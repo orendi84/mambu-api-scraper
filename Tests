@@ -1,0 +1,71 @@
+// Post-response script to extract reportKey and set it as environment variable
+console.log('Starting test script...');
+
+// First, check if we can access the response
+if (!pm.response) {
+    console.error('No response object available');
+    return;
+}
+
+// Log response details
+console.log('Response status:', pm.response.code);
+console.log('Response headers:', pm.response.headers.all());
+console.log('Raw response body:', pm.response.text());
+
+if (pm.response.code === 200) {
+    try {
+        // Parse response and immediately log it
+        const responseBody = pm.response.text();
+        console.log('Response body (raw):', responseBody);
+        
+        const responseData = JSON.parse(responseBody);
+        console.log('Parsed JSON:', responseData);
+        
+        // Explicitly check the reportKey
+        const reportKey = responseData.reportKey;
+        console.log('Extracted reportKey:', reportKey);
+        
+        if (reportKey) {
+            // Try setting the variable directly
+            postman.setEnvironmentVariable('accountingReport', reportKey);
+            // Also try the pm.environment method
+            pm.environment.set('accountingReport', reportKey);
+            
+            console.log('Variable set attempts completed');
+            // Verify immediately
+            console.log('Immediate verification:', pm.environment.get('accountingReport'));
+        } else {
+            console.error('No reportKey found in:', responseData);
+        }
+    } catch (error) {
+        console.error('Error in test script:', error.message);
+        console.error('Error stack:', error.stack);
+    }
+} else {
+    console.log('Request failed with status:', pm.response.code);
+}
+
+// Final verification
+console.log('Final environment variable value:', pm.environment.get('accountingReport'));
+
+// Simple version to set the reportKey
+pm.test("Set accountingReport variable", function() {
+    // Get the response body
+    const response = pm.response.json();
+    
+    // Check if we have the reportKey
+    if (response && response.reportKey) {
+        // Set the variable
+        pm.collectionVariables.set("accountingReport", response.reportKey);
+        // Also try setting as environment variable
+        pm.environment.set("accountingReport", response.reportKey);
+        
+        // Add assertions to verify
+        pm.expect(pm.collectionVariables.get("accountingReport")).to.eql(response.reportKey);
+        pm.expect(pm.environment.get("accountingReport")).to.eql(response.reportKey);
+    }
+});
+
+// Verify after setting
+console.log("Final verification - Collection variable:", pm.collectionVariables.get("accountingReport"));
+console.log("Final verification - Environment variable:", pm.environment.get("accountingReport")); 

@@ -1,0 +1,8 @@
+python mambu_scraper.py
+tail -f ~/mambu_scraper_output/stdout.log
+pip install selenium webdriver_manager beautifulsoup4 requests
+source /Users/gergoorendi/.cursor-tutor/.venv/bin/activate
+
+source /Users/gergoorendi/.cursor-tutor/.venv/bin/activate
+pip install beautifulsoup4 selenium webdriver-manager
+

@@ -1,0 +1,80 @@
+// Generate a UUID v4 style idempotency key
+const generateIdempotencyKey = () => {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+};
+
+// Generate and set the idempotency key variable
+pm.variables.set('IdempotencyKey', generateIdempotencyKey());
+
+if (pm.request.method === "GET" && !pm.info.requestName.toLowerCase().includes('config')) {
+    // Add standard headers for all GET requests except config
+    pm.request.headers.add({
+        key: 'Content-Type',
+        value: 'application/json'
+    });
+    
+    pm.request.headers.add({
+        key: 'Idempotency-Key',
+        value: '{{IdempotencyKey}}'
+    });
+}
+
+// Set API Key header
+pm.request.headers.upsert({
+    key: 'apikey',
+    value: pm.variables.get('apiKey')
+});
+
+// Set Idempotency-Key header
+pm.request.headers.upsert({
+    key: 'Idempotency-Key',
+    value: pm.variables.get('IdempotencyKey')
+});
+
+// Handle headers based on API name and method
+if (pm.info.requestName.toLowerCase().includes('config')) {
+    if (pm.request.method === "PUT") {
+        // For config APIs with PUT method
+        pm.request.headers.upsert({
+            key: 'Content-Type',
+            value: 'application/yaml'
+        });
+        pm.request.headers.upsert({
+            key: 'Accept',
+            value: 'application/vnd.mambu.v2+yaml'
+        });
+    } else if (pm.request.method === "GET") {
+        // For config APIs with GET method
+        pm.request.headers.upsert({
+            key: 'Accept',
+            value: 'application/vnd.mambu.v2+yaml'
+        });
+    }
+} else if (!pm.info.requestName.includes('v1')) {
+    // For non-v1, non-config APIs
+    pm.request.headers.upsert({
+        key: 'Content-Type',
+        value: pm.variables.get('ContentType')
+    });
+    pm.request.headers.upsert({
+        key: 'Accept',
+        value: pm.variables.get('Accept')
+    });
+}
+
+// Post-response script to extract reportKey and set it as environment variable
+if (pm.response.code === 200) {  // Check if response is successful
+    try {
+        const responseData = pm.response.json();
+        if (responseData.reportKey) {
+            pm.environment.set('accountingReport', responseData.reportKey);
+            console.log('Successfully set accountingReport variable to:', responseData.reportKey);
+        }
+    } catch (error) {
+        console.error('Error processing response:', error);
+    }
+}

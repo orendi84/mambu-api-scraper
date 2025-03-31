@@ -1,0 +1,50 @@
+// Method 1: UUID v4 (most recommended for idempotency keys)
+const uuid = require('uuid');
+const idempotencyKey = uuid.v4();
+
+// Method 2: Timestamp + Random string
+// const idempotencyKey = Date.now() + '-' + Math.random().toString(36).substring(2);
+
+// Method 3: Timestamp + GUID
+// const idempotencyKey = Date.now() + '-' + ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+//     (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+// );
+
+// Set the idempotency key as an environment variable
+pm.environment.set('Idempotency-Key', idempotencyKey);
+
+// Generate current date plus one day
+const tomorrow = new Date();
+tomorrow.setDate(tomorrow.getDate() + 1);
+
+// Format date as YYYY-MM-DD
+const formattedDate = tomorrow.toISOString().split('T')[0];
+pm.environment.set('currentDatePlusOne', formattedDate);
+
+// Remove Content-Type header as it's not needed for GET request
+pm.request.headers.remove('Content-Type');
+
+// Ensure correct Accept header for v2 API
+pm.request.headers.upsert({
+    key: 'Accept',
+    value: 'application/vnd.mambu.v2+json'
+});
+
+// Set API Key header
+pm.request.headers.upsert({
+    key: 'apikey',
+    value: pm.variables.get('apiKey')
+});
+
+// Set Idempotency-Key header
+pm.request.headers.upsert({
+    key: 'Idempotency-Key',
+    value: pm.variables.get('IdempotencyKey')
+});
+
+// Optional: Log the generated values to the console
+console.log('Generated Idempotency-Key:', idempotencyKey);
+console.log('Generated Date Plus One:', formattedDate);
+
+// Remove Idempotency-Key header for this specific request
+pm.request.headers.remove('Idempotency-Key'); 
