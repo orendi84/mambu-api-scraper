@@ -1,26 +1,28 @@
-# Mambu Scraper
+# Mambu API Documentation Scraper
 
-A Python-based web scraper for Mambu platform data collection.
+This tool scrapes the Mambu API documentation from api.mambu.com and saves it in a format suitable for large language models (LLMs).
 
 ## Features
 
-- Automated web scraping using Selenium
-- BeautifulSoup for HTML parsing
-- Logging functionality
-- Chrome WebDriver management
+- Scrapes all API endpoint documentation from api.mambu.com
+- Extracts endpoint details, parameters, request/response examples, and descriptions
+- Saves data in both JSON and Markdown formats
+- Generates a table of contents for easy navigation
+- Preserves code blocks and formatting
+- Includes source URLs for reference
 
-## Prerequisites
+## Requirements
 
-- Python 3.8 or higher
+- Python 3.8+
 - Chrome browser installed
-- Git
+- Dependencies listed in requirements.txt
 
 ## Installation
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/orendi84/mambu_scraper.git
-cd mambu_scraper
+git clone https://github.com/yourusername/mambu_api_scraper.git
+cd mambu_api_scraper
 ```
 
 2. Create and activate a virtual environment:
@@ -38,19 +40,23 @@ pip install -r requirements.txt
 
 Run the scraper:
 ```bash
-python mambu_scraper.py
+python src/api_scraper.py
 ```
 
-## Configuration
+The script will:
+1. Scrape all API endpoint documentation
+2. Save the data in two formats:
+   - `mambu_api_documentation_TIMESTAMP.json` (structured data)
+   - `mambu_api_documentation_TIMESTAMP.md` (formatted for LLMs)
 
-The scraper can be configured by modifying the following:
-- Logging settings in `mambu_scraper.py`
-- Chrome options in the `setup_driver()` function
-- Scraping logic in the `main()` function
+## Output Format
 
-## Logging
-
-Logs are stored in `mambu_scraper.log` and also displayed in the console.
+The Markdown output includes:
+- A table of contents with links to each endpoint
+- Endpoint details (URL, method, description)
+- Request/response examples
+- Parameter descriptions
+- Source URLs for reference
 
 ## License
 
