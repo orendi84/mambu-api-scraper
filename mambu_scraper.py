@@ -1,5 +1,11 @@
-# Import necessary libraries
-from bs4 import BeautifulSoup # Note: BeautifulSoup is imported but not used in the provided logic. Consider removing if not needed elsewhere.
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
 import requests
 import time
 import logging
@@ -7,714 +13,724 @@ import json
 from datetime import datetime
 from urllib.parse import urljoin
 import re
-import concurrent.futures
-import threading
-import hashlib
-from tqdm import tqdm
-import pickle
-import zlib
-from pathlib import Path
-import platform # Note: platform is imported but not used. Consider removing.
-from requests.adapters import HTTPAdapter
-# Corrected import path for Retry based on modern urllib3 structure if needed,
-# but requests usually bundles its own vendored version.
-# from urllib3.util.retry import Retry
-from requests.packages.urllib3.util.retry import Retry # Keep this if it works in your env
-from playwright.sync_api import sync_playwright
-# Note: asyncio is imported but not used in the sync playwright implementation. Consider removing.
-# import asyncio
+import os
+import urllib.request
+import zipfile
+import io
+import ssl
+import certifi
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
+import html2text
+from collections import deque
+import argparse
 
-# --- Logging Setup ---
-# Configure logging to write to a file and stream to console
-logging.basicConfig(
-    level=logging.DEBUG, # Set logging level to DEBUG for more detailed information
-    format='%(asctime)s - %(levelname)s - %(message)s', # Define log message format
-    handlers=[
-        logging.FileHandler('mambu_scraper.log'), # Log to a file named 'mambu_scraper.log'
-        logging.StreamHandler() # Also output logs to the console
-    ]
-)
+# --- Add Logging Setup Function --- 
+def setup_logging(log_level="INFO"):
+    """Sets up basic logging configuration."""
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    logging.basicConfig(level=level,
+                        format='%(asctime)s - %(levelname)s - %(message)s',
+                        handlers=[
+                            logging.FileHandler("scraper.log", mode='w'), # Log to file
+                            logging.StreamHandler()  # Also log to console
+                        ])
+    # Suppress verbose logging from selenium and urlib3
+    logging.getLogger("selenium").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("websockets").setLevel(logging.WARNING) # If using websockets
+    logging.info(f"Logging configured at level: {log_level}")
+# --- End Logging Setup Function --- 
 
-# --- Rate Limiter Class ---
-class RateLimiter:
-    """Limits the rate of function calls to avoid overloading the server."""
-    def __init__(self, calls_per_second=2):
-        """
-        Initializes the RateLimiter.
-        Args:
-            calls_per_second (int): Maximum number of calls allowed per second.
-        """
-        self.calls_per_second = calls_per_second
-        self.interval = 1.0 / self.calls_per_second # Calculate minimum time interval between calls
-        self.last_call_time = 0 # Timestamp of the last call
-        self.lock = threading.Lock() # Thread lock for safe concurrent access
+def setup_driver():
+    """Initialize and return a Chrome driver for scraping."""
+    chrome_options = Options()
+    chrome_options.add_argument("--window-size=1920,1080")
+    # Don't use headless mode so we can see what's happening
+    # chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    
+    try:
+        chromedriver_path = get_chromedriver_path()
+        service = Service(executable_path=chromedriver_path)
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        logging.info(f"Using cached ChromeDriver from: {chromedriver_path}")
+        return driver
+    except Exception as e:
+        logging.error(f"Error setting up ChromeDriver: {str(e)}")
+        raise
 
-    def wait(self):
-        """Waits if necessary to enforce the rate limit."""
-        with self.lock: # Acquire lock to ensure thread safety
-            current_time = time.time()
-            time_since_last_call = current_time - self.last_call_time
-            # Calculate time to wait if the interval hasn't passed
-            wait_time = self.interval - time_since_last_call
-            if wait_time > 0:
-                time.sleep(wait_time) # Pause execution
-            self.last_call_time = time.time() # Update the last call time
+def clean_text(text):
+    """Clean and normalize text."""
+    if not text:
+        return ""
+    # Remove extra whitespace
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
-# --- Mambu Scraper Class ---
-class MambuScraper:
-    """Scrapes documentation from the Mambu support website."""
-    def __init__(self, max_workers=4, calls_per_second=2):
-        """
-        Initializes the MambuScraper.
-        Args:
-            max_workers (int): Maximum number of concurrent threads for scraping.
-            calls_per_second (int): Maximum requests per second allowed.
-        """
-        self.base_url = "https://support.mambu.com/docs" # Starting URL for scraping
-        self.max_workers = max_workers # Max threads for parallel processing
-        self.rate_limiter = RateLimiter(calls_per_second) # Initialize rate limiter
-        self.cache_dir = Path('cache') # Directory to store cached page content
-        self.cache_dir.mkdir(exist_ok=True) # Create cache directory if it doesn't exist
-        self._setup_session() # Configure the requests session
-        self.visited_urls = set() # Keep track of visited URLs during link discovery
-        # Dictionary to store scraped data
-        self.documentation = {
-            'timestamp': datetime.now().isoformat(), # Timestamp of when scraping started
-            'pages': [], # List to hold content of individual pages
-            'common_sections': { # Dictionary to categorize common text patterns found
-                'ui_elements': [],
-                'configuration_warnings': [],
-                'feature_requirements': [],
-                'permissions': []
-            }
-        }
-        self.seen_titles = set() # Keep track of page titles to avoid duplicates in output
-        self.playwright = None # Playwright instance
-        self.browser = None # Browser instance managed by Playwright
-
-    def _setup_browser(self):
-        """Initializes Playwright and launches a headless browser instance."""
-        logging.info("Setting up Playwright browser...")
+def get_chromedriver_path():
+    """Get the path to the ChromeDriver executable."""
+    import urllib.request
+    import zipfile
+    import io
+    
+    chromedriver_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chromedriver_bin')
+    chromedriver_path = os.path.join(chromedriver_dir, 'chromedriver')
+    os.makedirs(chromedriver_dir, exist_ok=True)
+    
+    if not os.path.exists(chromedriver_path):
+        logging.info("ChromeDriver not found locally. Downloading...")
+        # Match ChromeDriver version to installed Chrome version (134.0.6998.166 -> using 134.0.6998.165)
+        chromedriver_url = 'https://storage.googleapis.com/chrome-for-testing-public/134.0.6998.165/mac-arm64/chromedriver-mac-arm64.zip'
+        
         try:
-            self.playwright = sync_playwright().start()
-            # Launch Chromium browser in headless mode (no GUI)
-            self.browser = self.playwright.chromium.launch(headless=True)
-            logging.info("Playwright browser launched successfully.")
-        except Exception as e:
-            logging.error(f"Failed to launch Playwright browser: {e}")
-            raise # Reraise exception to stop execution if browser setup fails
-
-    def _cleanup_browser(self):
-        """Closes the browser and stops Playwright."""
-        logging.info("Cleaning up Playwright browser...")
-        if self.browser:
-            try:
-                self.browser.close()
-                logging.info("Browser closed.")
-            except Exception as e:
-                logging.error(f"Error closing browser: {e}")
-        if self.playwright:
-            try:
-                self.playwright.stop()
-                logging.info("Playwright stopped.")
-            except Exception as e:
-                logging.error(f"Error stopping Playwright: {e}")
-        self.browser = None
-        self.playwright = None
-
-    def _setup_session(self):
-        """Sets up a requests Session with retry logic and headers."""
-        # Note: This session is not used by Playwright for page loading,
-        # but could be useful if making direct API calls or downloading files.
-        session = requests.Session()
-        # Define a retry strategy for HTTP requests
-        retry_strategy = Retry(
-            total=3, # Total number of retries
-            backoff_factor=1, # Time factor for exponential backoff between retries
-            status_forcelist=[429, 500, 502, 503, 504], # HTTP status codes that trigger a retry
-        )
-        # Create an adapter with the retry strategy
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        # Mount the adapter for both HTTP and HTTPS protocols
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        # Set a user-agent header to mimic a real browser
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 MambuDocsScraper/1.0'
-        })
-        self.session = session
-
-    def _get_cache_key(self, url):
-        """Generates a unique filename (hash) for caching based on URL."""
-        return hashlib.md5(url.encode()).hexdigest()
-
-    def _get_cached_content(self, url):
-        """Retrieves page content from cache if it exists and is valid."""
-        cache_key = self._get_cache_key(url)
-        cache_file = self.cache_dir / f"{cache_key}.pkl"
-        if cache_file.exists():
-            try:
-                with open(cache_file, 'rb') as f:
-                    compressed_data = f.read()
-                    # Decompress and deserialize the cached data
-                    decompressed_data = zlib.decompress(compressed_data)
-                    data = pickle.loads(decompressed_data)
-                    logging.info(f"Cache hit for URL: {url}")
-                    return data
-            except Exception as e:
-                # Handle errors during cache reading (e.g., corrupted file)
-                logging.warning(f"Cache read error for {url}: {e}. Will re-fetch.")
-                try:
-                    cache_file.unlink() # Attempt to delete corrupted cache file
-                except OSError as oe:
-                    logging.error(f"Could not delete corrupted cache file {cache_file}: {oe}")
-                return None
-        logging.info(f"Cache miss for URL: {url}")
-        return None # Cache file doesn't exist or was invalid
-
-    def _cache_content(self, url, content):
-        """Saves page content to the cache with compression."""
-        if content is None: # Do not cache None values
-             logging.warning(f"Attempted to cache None content for {url}. Skipping.")
-             return
-        cache_key = self._get_cache_key(url)
-        cache_file = self.cache_dir / f"{cache_key}.pkl"
-        try:
-            # Serialize and compress the content data
-            serialized_data = pickle.dumps(content)
-            compressed_data = zlib.compress(serialized_data)
-            # Write the compressed data to the cache file
-            with open(cache_file, 'wb') as f:
-                f.write(compressed_data)
-            logging.info(f"Cached content for URL: {url}")
-        except Exception as e:
-            # Handle errors during caching
-            logging.error(f"Cache write error for {url}: {e}")
-
-    # --- MODIFIED clean_text Function ---
-    def clean_text(self, text):
-        """
-        Cleans text by removing leading/trailing whitespace from lines
-        and normalizing multiple blank lines into single blank lines.
-        Preserves single newlines between paragraphs.
-        """
-        if not text:
-            return ""
-        # Split text into lines
-        lines = text.splitlines()
-        # Strip whitespace from each line and keep non-empty lines
-        stripped_lines = [line.strip() for line in lines]
-        # Filter out empty lines to avoid excessive blank lines, but keep intended paragraph breaks
-        # This simple join might merge lines that were meant to be separate if they only contained whitespace initially.
-        # A more sophisticated approach might be needed if precise whitespace preservation is critical.
-        # For Markdown feeding, joining non-empty stripped lines is usually sufficient.
-        cleaned_text = "\n".join(line for line in stripped_lines if line) # Join non-empty lines with single newline
-        return cleaned_text.strip() # Final strip for the whole text block
-
-    def _extract_common_content(self, content):
-        """Extracts and categorizes common text patterns using regex."""
-        # Define regex patterns for different categories of common info
-        patterns = {
-            'configuration_warnings': [
-                r"If you PUT a configuration to Mambu, any.*?will be deleted",
-                r"PATCH requests are not currently supported",
-                r"configuration settings not included in the new.*?will be deleted"
-            ],
-            'ui_elements': [
-                r"menu in the top left",
-                r"navigation bar",
-                r"menu items",
-                r"view preferences",
-                r"custom views"
-            ],
-            'feature_requirements': [
-                r"feature enabled for your tenant",
-                r"feature must be enabled",
-                r"requires the.*?feature"
-            ],
-            'permissions': [
-                r"permission required",
-                r"user must have.*?permission",
-                r"requires.*?permission"
-            ]
-        }
-
-        # Iterate through categories and patterns
-        for category, pattern_list in patterns.items():
-            for pattern in pattern_list:
-                try:
-                    # Find all occurrences of the pattern in the content (case-insensitive)
-                    matches = re.finditer(pattern, content, re.IGNORECASE)
-                    for match in matches:
-                        # Add the found text snippet to the corresponding category
-                        self.documentation['common_sections'][category].append(match.group())
-                except Exception as e:
-                    logging.error(f"Regex error in _extract_common_content for pattern '{pattern}': {e}")
-
-
-    def _deduplicate_title(self, title):
-        """Cleans and standardizes page titles."""
-        if not title:
-            return ""
-        # Remove potential trailing numbers in parentheses (e.g., "Title (1)")
-        title = re.sub(r'\s*\(\d+\)$', '', title)
-        # Replace multiple whitespace characters with a single space
-        title = re.sub(r'\s+', ' ', title)
-        return title.strip() # Remove leading/trailing whitespace
-
-    # --- MODIFIED extract_page_content Function ---
-    def extract_page_content(self, url):
-        """
-        Extracts the title and main content from a given documentation page URL using Playwright.
-        Uses inner_text() for better formatting preservation, falling back to text_content().
-        Applies the modified clean_text function.
-        """
-        # Check cache first
-        cached_content = self._get_cached_content(url)
-        if cached_content:
-            return cached_content # Return cached data if available
-
-        # Ensure browser is initialized
-        if not self.browser:
-            logging.error("Browser not initialized in this thread. Cannot process URL.")
-            if not self.playwright:
-                logging.error("Playwright not initialized. Cannot create context.")
-                return None
-
-        context = None
-        page = None
-        try:
-            # Apply rate limiting before making the request
-            self.rate_limiter.wait()
-            logging.info(f"Processing URL: {url}")
-
-            # Create a new browser context and page for isolation
-            context = self.browser.new_context(user_agent=self.session.headers['User-Agent'])
-            page = context.new_page()
-
-            # Navigate to the URL, wait for network activity to settle
-            page.goto(url, wait_until='networkidle', timeout=60000)
-
-            # --- Extract Title ---
-            title = ""
-            try:
-                title_element = page.locator('h1').first
-                title_element.wait_for(state='visible', timeout=5000)
-                if title_element.is_visible():
-                    raw_title = title_element.text_content()
-                    title = self._deduplicate_title(raw_title)
-                else:
-                    logging.warning(f"h1 title element not visible for {url}")
-            except Exception as title_err:
-                logging.warning(f"Could not find or access h1 title for {url}: {title_err}")
-
-            # Fallback title if h1 is not found
-            if not title:
-                title = url.split('/')[-1].replace('-', ' ').title()
-                logging.info(f"Using fallback title '{title}' for {url}")
-
-            # --- Extract Main Content ---
-            # List of potential CSS selectors for the main content area
-            content_selectors = [
-                "article.article-content", # Primary target
-                "div.article-body",       # Common alternative
-                "div.content-body",       # Another possibility
-                "div.docs-content",       # Specific to some doc systems
-                "article",                # General article tag
-                "main",                   # General main tag
-                "[role='main']"           # Accessibility role
-            ]
-
-            content_text = None
-            content_element_found = None
-            # Iterate through selectors to find the first matching and visible one
-            for selector in content_selectors:
-                try:
-                    content_element = page.locator(selector).first
-                    content_element.wait_for(state='visible', timeout=3000)
-                    if content_element.is_visible():
-                        content_element_found = content_element
-                        logging.info(f"Using selector '{selector}' for main content on {url}")
+            # Download the zip file
+            context = ssl.create_default_context(cafile=certifi.where())
+            response = urllib.request.urlopen(chromedriver_url, context=context)
+            zip_data = io.BytesIO(response.read())
+            
+            # Extract the correct binary
+            with zipfile.ZipFile(zip_data) as zip_file:
+                # Find the correct binary path within the zip (it might be nested)
+                binary_path_in_zip = None
+                for name in zip_file.namelist():
+                    # Look for the specific binary path, e.g., 'chromedriver-mac-arm64/chromedriver'
+                    if name.endswith('/chromedriver') and not name.startswith('__MACOSX'):
+                        binary_path_in_zip = name
                         break
-                except Exception:
-                    logging.debug(f"Selector '{selector}' not found or not visible quickly for {url}")
-                    continue
-
-            # Extract text from the found content element
-            if content_element_found:
-                try:
-                    # Extract all text content including formulas and examples
-                    content_text = content_element_found.evaluate("""
-                        (element) => {
-                            // Get all text nodes
-                            const walker = document.createTreeWalker(
-                                element,
-                                NodeFilter.SHOW_TEXT,
-                                null,
-                                false
-                            );
-                            
-                            let text = '';
-                            let node;
-                            while (node = walker.nextNode()) {
-                                // Get the parent element
-                                const parent = node.parentElement;
-                                
-                                // Skip if parent is a script or style tag
-                                if (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE') {
-                                    continue;
-                                }
-                                
-                                // Add the text content
-                                text += node.textContent;
-                                
-                                // Add newlines after block elements
-                                if (parent.tagName === 'P' || 
-                                    parent.tagName === 'DIV' || 
-                                    parent.tagName === 'H1' || 
-                                    parent.tagName === 'H2' || 
-                                    parent.tagName === 'H3' || 
-                                    parent.tagName === 'H4' || 
-                                    parent.tagName === 'H5' || 
-                                    parent.tagName === 'H6' || 
-                                    parent.tagName === 'BR' ||
-                                    parent.tagName === 'LI') {
-                                    text += '\\n';
-                                }
-                                
-                                // Add extra newline after headings
-                                if (parent.tagName === 'H1' || 
-                                    parent.tagName === 'H2' || 
-                                    parent.tagName === 'H3' || 
-                                    parent.tagName === 'H4' || 
-                                    parent.tagName === 'H5' || 
-                                    parent.tagName === 'H6') {
-                                    text += '\\n';
-                                }
-                            }
-                            return text;
-                        }
-                    """)
+                
+                if binary_path_in_zip:
+                    logging.info(f"Extracting {binary_path_in_zip} to {chromedriver_path}")
+                    with zip_file.open(binary_path_in_zip) as source, open(chromedriver_path, 'wb') as target:
+                        target.write(source.read())
+                    # Make ChromeDriver executable
+                    os.chmod(chromedriver_path, 0o755)
+                    logging.info("ChromeDriver downloaded and extracted successfully.")
+                else:
+                    raise Exception("Could not find chromedriver binary in the downloaded zip file.")
                     
-                    if not content_text or content_text.isspace():
-                        logging.warning(f"JavaScript extraction returned empty/whitespace for {url}. Trying inner_text().")
-                        content_text = content_element_found.inner_text(timeout=10000)
-                        
-                    if not content_text or content_text.isspace():
-                        logging.warning(f"inner_text() also returned empty/whitespace for {url}. Trying text_content().")
-                        content_text = content_element_found.text_content(timeout=10000)
-                        
-                    if not content_text or content_text.isspace():
-                        logging.error(f"All text extraction methods failed for {url}")
-                        content_text = None
-                    else:
-                        logging.info(f"Successfully extracted content for {url}")
-                        
-                except Exception as e:
-                    logging.error(f"Error extracting content for {url}: {e}")
-                    content_text = None
-            else:
-                logging.warning(f"Could not find a suitable main content element for {url}")
-                content_text = None
-
-            # --- Process and Cache Result ---
-            if content_text:
-                # Apply the clean_text function
-                full_content = self.clean_text(content_text)
-
-                # Extract common patterns from the cleaned content
-                self._extract_common_content(full_content)
-
-                # Add source attribution
-                full_content += f"\n\n*Source: {url}*"
-
-                # Prepare result dictionary
-                result = {
-                    'title': title,
-                    'content': full_content,
-                    'url': url
-                }
-                # Cache the successful result
-                self._cache_content(url, result)
-                return result
-            else:
-                logging.error(f"No content extracted for URL: {url}")
-                return None
-
         except Exception as e:
-            logging.error(f"General error processing {url}: {str(e)}", exc_info=True)
+            logging.error(f"Failed to download or extract ChromeDriver: {e}")
+            raise  # Re-raise the exception to stop execution
+            
+    else:
+        logging.debug(f"Using existing ChromeDriver at {chromedriver_path}")
+
+    # Check if the file is executable
+    if not os.access(chromedriver_path, os.X_OK):
+         logging.warning(f"ChromeDriver at {chromedriver_path} is not executable. Attempting to set permissions.")
+         os.chmod(chromedriver_path, 0o755)
+         if not os.access(chromedriver_path, os.X_OK):
+             raise Exception(f"ChromeDriver at {chromedriver_path} is still not executable after setting permissions.")
+             
+    return chromedriver_path
+
+def handle_overlays(driver, timeout=5):
+    """Attempts to find and click common accept/dismiss buttons for overlays (like cookie banners)."""
+    accept_selectors = [
+        "//button[normalize-space(.)='OK']", # Specific selector for Mambu cookie banner
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'allow')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'confirm')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'got it')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'okay')]",
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept')]",
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree')]",
+        "[id*='cookie'] button[class*='accept']",
+        "[id*='consent'] button[class*='accept']",
+        "[aria-label*='consent'] button",
+        "button#hs-eu-confirmation-button", # HubSpot
+        "button#onetrust-accept-btn-handler", # OneTrust
+    ]
+    dismiss_selectors = [
+        "//button[contains(@aria-label, 'Dismiss')]",
+        "//button[contains(@aria-label, 'Close')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'dismiss')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'close')]",
+        "//span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'close')]", # Sometimes spans act as close buttons
+        "[aria-label*='close']",
+    ]
+
+    logging.debug("Attempting to handle overlays...")
+
+    # Try accept buttons first
+    for selector in accept_selectors:
+        try:
+            # Wait briefly for the element to be present and clickable
+            wait = WebDriverWait(driver, timeout)
+            # Use XPath for most selectors, handle CSS selectors separately
+            if selector.startswith("//") or selector.startswith("(//"):
+                 element = wait.until(EC.element_to_be_clickable((By.XPATH, selector)))
+            else:
+                 element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+
+            logging.info(f"Found potential accept button with selector: {selector}. Attempting to click.")
+            element.click()
+            logging.info("Clicked accept button.")
+            time.sleep(1) # Short pause to allow overlay to disappear
+            return True # Overlay handled
+        except (NoSuchElementException, TimeoutException):
+            logging.debug(f"Accept selector not found or not clickable: {selector}")
+        except ElementClickInterceptedException:
+            logging.warning(f"Accept button click intercepted for selector: {selector}. Trying JavaScript click.")
+            try:
+                 driver.execute_script("arguments[0].click();", element)
+                 logging.info("Clicked accept button using JavaScript.")
+                 time.sleep(1)
+                 return True # Overlay handled
+            except Exception as js_ex:
+                 logging.error(f"JavaScript click failed for {selector}: {js_ex}")
+        except Exception as e:
+            logging.error(f"Error clicking accept button with selector {selector}: {e}")
+
+    # Try dismiss buttons if no accept button worked
+    for selector in dismiss_selectors:
+        try:
+            wait = WebDriverWait(driver, timeout)
+            if selector.startswith("//") or selector.startswith("(//"):
+                element = wait.until(EC.element_to_be_clickable((By.XPATH, selector)))
+            else:
+                element = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+
+            logging.info(f"Found potential dismiss/close button with selector: {selector}. Attempting to click.")
+            element.click()
+            logging.info("Clicked dismiss/close button.")
+            time.sleep(1)
+            return True # Overlay handled
+        except (NoSuchElementException, TimeoutException):
+            logging.debug(f"Dismiss selector not found or not clickable: {selector}")
+        except ElementClickInterceptedException:
+             logging.warning(f"Dismiss button click intercepted for selector: {selector}. Trying JavaScript click.")
+             try:
+                 driver.execute_script("arguments[0].click();", element)
+                 logging.info("Clicked dismiss button using JavaScript.")
+                 time.sleep(1)
+                 return True # Overlay handled
+             except Exception as js_ex:
+                 logging.error(f"JavaScript click failed for {selector}: {js_ex}")
+        except Exception as e:
+            logging.error(f"Error clicking dismiss button with selector {selector}: {e}")
+
+
+    logging.debug("No common overlay buttons found or clicked.")
+    return False # No overlay handled
+
+def extract_page_content(driver, url):
+    """Extract content from a single documentation page and convert to markdown"""
+    try:
+        logging.info(f"Navigating to {url}")
+        driver.get(url)
+        # Wait for page title to be present
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "title")))
+        title = driver.title
+        logging.info(f"Page loaded: {title}")
+
+        # --- Add overlay handling here ---
+        logging.debug("Attempting to handle overlays...")
+        try:
+            handle_overlays(driver)
+            logging.debug("Finished handling overlays.")
+        except Exception as overlay_ex:
+            logging.error(f"Error during handle_overlays call: {overlay_ex}", exc_info=True)
+        # --- End overlay handling ---
+
+        # --- Simulate user interaction to trigger content loading ---
+        logging.info("Simulating user interaction to trigger content loading...")
+        try:
+            # Scroll down gradually
+            for scroll_position in [300, 600, 900, 1200]:
+                driver.execute_script(f"window.scrollTo(0, {scroll_position});")
+                time.sleep(1)  # Short pause between scrolls
+                
+            # Move mouse (simulated via JavaScript)
+            driver.execute_script("""
+                // Create and dispatch a mousemove event
+                const evt = new MouseEvent('mousemove', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                });
+                document.body.dispatchEvent(evt);
+            """)
+            
+            # Wait longer for content to potentially load
+            logging.info("Waiting 10 seconds after user interaction simulation...")
+            time.sleep(10)
+            
+            # Try to force content rendering directly
+            driver.execute_script("""
+                // Try to find the content container
+                const contentContainer = document.querySelector('.content_block_text');
+                if (contentContainer) {
+                    // Log what we found for debugging
+                    console.log('Content container found, content length:', contentContainer.innerHTML.length);
+                    
+                    // Try to expose any hidden elements
+                    Array.from(contentContainer.querySelectorAll('*')).forEach(el => {
+                        el.style.display = 'block';
+                        el.style.visibility = 'visible';
+                        el.style.opacity = '1';
+                    });
+                }
+            """)
+            
+            # One more wait after JavaScript execution
+            time.sleep(5)
+            
+        except Exception as interact_ex:
+            logging.error(f"Error during user interaction simulation: {interact_ex}")
+        # --- End user interaction simulation ---
+
+        logging.debug("Pause finished.")
+
+        logging.debug("Attempting to parse page source with BeautifulSoup...")
+        try:
+            page_source = driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+            logging.debug("Successfully parsed page source.")
+        except Exception as parse_ex:
+            logging.error(f"Error parsing page source with BeautifulSoup for {url}: {parse_ex}", exc_info=True)
             return None
 
-        finally:
-            if page:
-                try:
-                    page.close()
-                except Exception as e:
-                    logging.error(f"Error closing page for {url}: {e}")
-            if context:
-                try:
-                    context.close()
-                except Exception as e:
-                    logging.error(f"Error closing context for {url}: {e}")
-
-    def get_all_doc_links(self):
-        """Discovers all documentation links from the Mambu support website."""
-        all_links = set()
-        visited = set()
-        to_visit = {self.base_url}
+        # Extract title - try multiple possible locations
+        title = None
+        title_selectors = ['h1', '.page-title', '.documentation-title', '.doc-title', '.content_block_article_head h1'] # Added specific title selector
+        for selector in title_selectors:
+            title_elem = soup.select_one(selector)
+            if title_elem:
+                title = title_elem.text.strip()
+                logging.info(f"Extracted title: '{title}'")
+                break
         
-        context = None
-        page = None
-        try:
-            context = self.browser.new_context()
-            page = context.new_page()
-            
-            while to_visit:
-                current_url = to_visit.pop()
-                if current_url in visited:
-                    continue
-                    
-                try:
-                    logging.info(f"Discovering links on: {current_url}")
-                    page.goto(current_url, wait_until='networkidle', timeout=30000)
-                    
-                    # Wait for the main content to load
-                    page.wait_for_selector('a[href*="/docs/"]', timeout=10000)
-                    
-                    # Get all documentation links
-                    links = page.query_selector_all('a[href*="/docs/"]')
-                    for link in links:
-                        try:
-                            href = link.get_attribute('href')
-                            if href:
-                                full_url = urljoin(self.base_url, href)
-                                if full_url.startswith(self.base_url) and '#' not in full_url:
-                                    all_links.add(full_url)
-                                    if full_url not in visited:
-                                        to_visit.add(full_url)
-                        except:
-                            continue
-                    
-                    visited.add(current_url)
-                    
-                except Exception as e:
-                    logging.error(f"Error discovering links on {current_url}: {str(e)}")
-                    continue
-                    
-        except Exception as e:
-            logging.error(f"Error getting documentation links: {str(e)}")
-            
-        finally:
-            if page:
-                page.close()
-            if context:
-                context.close()
+        if not title:
+            title = "Untitled"
+            logging.warning(f"Could not extract title for {url}, using 'Untitled'.")
+
+        # --- Try Multiple Approaches to Find Content ---
+        logging.info("Trying multiple approaches to find content...")
+        content_md = ""
+        
+        # Approach 1: Standard container finding
+        content_selectors = [
+            '.content_block_text',
+            'article.content', 
+            'main[role="main"]', 
+            '#main-content',
+            '.article-body',
+            'div[itemprop="articleBody"]',
+            '.article-content', # Added more specific selectors
+            'div.text',
+            'table', # Try directly finding a table
+        ]
+        
+        for selector in content_selectors:
+            logging.debug(f"Trying to find content with selector: '{selector}'")
+            elements = soup.select(selector)
+            if elements:
+                logging.info(f"Found {len(elements)} potential content elements with selector: '{selector}'")
                 
-        logging.info(f"Link discovery finished. Found {len(all_links)} unique potential documentation links.")
-        return all_links
+                # Try each found element
+                for i, element in enumerate(elements):
+                    try:
+                        # Try html2text first
+                        html_content = str(element)
+                        h = html2text.HTML2Text()
+                        h.ignore_links = False
+                        h.ignore_images = True
+                        md = h.handle(html_content).strip()
+                        
+                        # If we got substantial content, use it
+                        if md and len(md) > 100:  # Arbitrary length to filter out tiny snippets
+                            logging.info(f"Found substantial content ({len(md)} chars) with selector '{selector}' (element {i+1}/{len(elements)})")
+                            content_md = md
+                            break
+                            
+                        # If html2text doesn't work, try get_text()
+                        text = element.get_text(separator='\n', strip=True)
+                        if text and len(text) > 100:
+                            logging.info(f"Found substantial text content ({len(text)} chars) with selector '{selector}' (element {i+1}/{len(elements)})")
+                            content_md = text
+                            break
+                    except Exception as el_ex:
+                        logging.error(f"Error processing element {i+1} with selector '{selector}': {el_ex}")
+                
+                # If we found content, break out of the selector loop
+                if content_md:
+                    break
+        
+        # Approach 2: Direct JavaScript Extraction (last resort)
+        if not content_md:
+            logging.info("Trying direct JavaScript extraction as last resort...")
+            try:
+                # Extract text content using JavaScript
+                js_content = driver.execute_script("""
+                    // Try to extract text from the document
+                    const extractText = (element) => {
+                        if (!element) return '';
+                        
+                        // Get all text nodes
+                        const walker = document.createTreeWalker(
+                            element, 
+                            NodeFilter.SHOW_TEXT, 
+                            null, 
+                            false
+                        );
+                        
+                        let text = '';
+                        let node;
+                        while(node = walker.nextNode()) {
+                            if (node.textContent.trim()) {
+                                text += node.textContent.trim() + '\\n';
+                            }
+                        }
+                        return text;
+                    };
+                    
+                    // Try the main content area first
+                    const contentArea = document.querySelector('.content_block_text');
+                    if (contentArea) {
+                        return extractText(contentArea);
+                    }
+                    
+                    // Fall back to main content area
+                    return extractText(document.body);
+                """)
+                
+                if js_content and len(js_content) > 100:
+                    logging.info(f"Successfully extracted content ({len(js_content)} chars) via JavaScript")
+                    content_md = js_content
+            except Exception as js_ex:
+                logging.error(f"Error during JavaScript content extraction: {js_ex}")
+        
+        if not content_md:
+            logging.warning(f"All approaches failed to extract content from {url}")
+            return None
 
+        logging.info(f"Successfully extracted and formatted content from {url} (length: {len(content_md)})")
+        return {
+            'url': url,
+            'title': title,
+            'content': content_md
+        }
 
-    def process_urls_parallel(self, urls):
-        """Processes a list of URLs in parallel using a ThreadPoolExecutor."""
-        if not urls:
-            logging.warning("No URLs provided to process_urls_parallel.")
-            return
+    except Exception as e:
+        logging.error(f"Error extracting content from {url}: {str(e)}", exc_info=True)
+        return None
 
-        logging.info(f"Starting parallel processing of {len(urls)} URLs with {self.max_workers} workers...")
-        # Use ThreadPoolExecutor for concurrent page scraping
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit each URL to the executor for processing by extract_page_content
-            # Note the potential issues with sync Playwright and threads mentioned in extract_page_content
-            future_to_url = {executor.submit(self.extract_page_content, url): url for url in urls}
+def get_all_doc_links(driver, start_url):
+    """Recursively find all unique documentation links starting from a base URL."""
+    logging.info(f"Getting links from: {start_url}")
+    driver.get(start_url)
+    time.sleep(2)  # Allow page to load
+    soup = BeautifulSoup(driver.page_source, 'html.parser')
+    doc_links = set()
+    processed_urls = set([start_url])
+    urls_to_visit = deque([start_url])
 
-            # Process results as they complete, with a progress bar (tqdm)
-            for future in tqdm(concurrent.futures.as_completed(future_to_url), total=len(urls), desc="Scraping pages"):
-                url = future_to_url[future] # Get the URL associated with the future
-                try:
-                    page_content = future.result() # Get the result (or exception) from the future
-                    # If content was successfully extracted, add it to the documentation list
-                    if page_content:
-                        # Basic check for minimal content length (optional)
-                        if len(page_content.get('content', '')) > 50: # Example threshold
-                            self.documentation['pages'].append(page_content)
-                        else:
-                            logging.warning(f"Page content seems too short for {url}. Skipping addition.")
-                    # else: # No need for else, None result is already logged in extract_page_content
-                    #    logging.warning(f"No content returned for {url}")
+    # Define a limit for the number of links to collect during testing
+    max_links_to_find = 10 # <-- Updated limit
 
-                except Exception as e:
-                    # Log any exceptions raised during the execution of extract_page_content
-                    logging.error(f"Error processing future for URL {url}: {e}", exc_info=True)
+    while urls_to_visit:
+        current_url = urls_to_visit.popleft()
+        if not current_url.startswith(start_url):
+             logging.debug(f"Skipping external or non-doc link: {current_url}")
+             continue # Stay within the documentation section
 
-        logging.info("Parallel processing finished.")
-
-
-    def save_documentation(self):
-        """Saves the collected documentation to Markdown and JSON files."""
-        logging.info("Saving documentation...")
-        # Generate filenames with timestamp
-        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        md_file = Path(f"mambu_documentation_{timestamp_str}.md")
-        json_file = Path(f"mambu_documentation_{timestamp_str}.json")
-
-        # --- Deduplicate and Sort Pages ---
-        seen_titles_for_output = set()
-        unique_pages = []
-        duplicates_skipped = 0
-
-        for page in self.documentation['pages']:
-            # Ensure page data is valid
-            if not page or not page.get('title') or not page.get('content'):
-                logging.warning(f"Skipping invalid page data: {page.get('url', 'URL missing')}")
-                continue
-
-            title = page['title'] # Title should already be cleaned by _deduplicate_title
-
-            # Check if this title has already been added to the output
-            if title.lower() in seen_titles_for_output: # Case-insensitive check for duplicates
-                logging.info(f"Skipping duplicate title: '{title}' from URL: {page['url']}")
-                duplicates_skipped += 1
-                continue
-
-            # Add the title to the set and the page to the list
-            seen_titles_for_output.add(title.lower())
-            # *** REMOVED redundant clean_text call here ***
-            # page['content'] = self.clean_text(page['content']) # Content is cleaned during extraction
-            unique_pages.append(page)
-
-        logging.info(f"Removed {duplicates_skipped} pages due to duplicate titles.")
-
-        # Sort the unique pages alphabetically by title (case-insensitive)
-        unique_pages.sort(key=lambda x: x['title'].lower())
-        logging.info(f"Saving {len(unique_pages)} unique pages.")
-
-        # --- Write Markdown File ---
         try:
-            with open(md_file, 'w', encoding='utf-8') as f:
-                f.write("# Mambu Documentation\n\n")
-                f.write(f"*Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
+            logging.debug(f"Processing URL for links: {current_url}")
+            if current_url not in driver.current_url: # Navigate only if not already there
+                 driver.get(current_url)
+                 time.sleep(1) # Brief pause after navigation
 
-                # Write common sections found
-                f.write("## Common Information Snippets\n\n")
-                common_found = False
-                for section, items in self.documentation['common_sections'].items():
-                    unique_items = sorted(list(set(items))) # Deduplicate and sort items
-                    if unique_items:
-                        common_found = True
-                        f.write(f"### {section.replace('_', ' ').title()}\n\n")
-                        for item in unique_items:
-                            f.write(f"- {item}\n")
-                        f.write("\n")
-                if not common_found:
-                    f.write("*(No common information snippets were extracted based on defined patterns)*\n\n")
+            current_soup = BeautifulSoup(driver.page_source, 'html.parser')
+            links = current_soup.find_all('a', href=True)
+            logging.debug(f"Found {len(links)} potential links on {current_url}")
 
+            for link in links:
+                href = link['href']
+                full_url = urljoin(current_url, href)
 
-                # Write table of contents
-                f.write("## Table of Contents\n\n")
-                if unique_pages:
-                    for page in unique_pages:
-                        title = page['title']
-                        # Create a simple anchor link (GitHub-style)
-                        anchor = title.lower().replace(' ', '-').replace('/', '')
-                        anchor = re.sub(r'[^\w\-]+', '', anchor) # Remove non-alphanumeric chars except hyphen
-                        f.write(f"- [{title}](#{anchor})\n")
+                # Basic filtering (adjust as needed)
+                if full_url.startswith(start_url) and '#' not in full_url and full_url not in processed_urls:
+                    if '/docs/' in full_url: # Ensure it looks like a doc page
+                         logging.debug(f"Found potential doc link: {full_url}")
+                         doc_links.add(full_url)
+                         # ---- Stop if we have enough links ----
+                         if len(doc_links) >= max_links_to_find:
+                             logging.info(f"Reached link limit ({max_links_to_find}). Stopping link collection.")
+                             # Convert set to list before returning
+                             final_links = list(doc_links)
+                             logging.info(f"Collected {len(final_links)} unique doc links: {final_links}")
+                             return final_links
+                         # ---- End stop condition ----
+
+                    # Add to processed and queue for visiting only if it's within the scope
+                    # (Even if it's not a /docs/ page itself, it might contain links to them)
+                    processed_urls.add(full_url)
+                    urls_to_visit.append(full_url)
+                elif full_url in processed_urls:
+                     logging.debug(f"Skipping already processed URL: {full_url}")
                 else:
-                    f.write("*(No pages were successfully scraped)*\n")
-                f.write("\n")
+                     logging.debug(f"Skipping non-matching URL: {full_url}")
 
-                # Write page content
-                f.write("\n---\n\n") # Separator before content starts
-                if unique_pages:
-                    for page in unique_pages:
-                        # Use the same anchor generation logic for the header ID
-                        title = page['title']
-                        anchor = title.lower().replace(' ', '-').replace('/', '')
-                        anchor = re.sub(r'[^\w\-]+', '', anchor)
-                        # Write header with anchor (optional, depends on Markdown flavor)
-                        # f.write(f"<h1 id=\"{anchor}\">{page['title']}</h1>\n\n") # HTML anchor
-                        f.write(f"# {page['title']}\n\n") # Standard Markdown header
-                        f.write(f"{page['content']}\n\n") # Write the cleaned content
-                        f.write("---\n\n") # Separator between pages
+        except Exception as e:
+            logging.error(f"Error processing {current_url} for links: {e}")
+            # Continue with the next URL in the queue
+
+    # Convert set to list if loop finishes before limit is reached
+    final_links = list(doc_links)
+    logging.info(f"Finished collecting links. Found {len(final_links)} unique doc links: {final_links}")
+    return final_links
+
+# --- Restore Saving Functions --- 
+def save_as_json(data, filename):
+    """Saves the scraped data as a JSON file."""
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        logging.info(f"JSON data saved to: {filename}")
+    except IOError as e:
+        logging.error(f"Error saving JSON file {filename}: {e}")
+    except TypeError as e:
+        logging.error(f"Error serializing data to JSON for {filename}: {e}")
+
+def save_as_markdown(data, filename, total_links):
+    """Saves the scraped data as a Markdown file suitable for LLMs."""
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write("# Mambu Documentation\n\n")
+            f.write(f"*Generated on: {data.get('scrape_timestamp', datetime.now().isoformat())}*\n\n")
+            f.write(f"*Based on {len(data.get('pages', []))} scraped pages (out of {total_links} found links)*\n\n") # Add context
+            f.write("## Table of Contents\n\n")
+            
+            # Generate table of contents only if pages exist
+            if data.get('pages'):
+                for i, page in enumerate(data['pages']):
+                    # Create a simple anchor based on page index or title
+                    anchor = f"page-{i+1}-{page.get('title', 'untitled').lower().replace(' ', '-').replace('/', '')}"
+                    anchor = re.sub(r'[^a-z0-9-]', '', anchor) # Sanitize anchor
+                    f.write(f"- [{page.get('title', 'Untitled')}](#{anchor})\n")
+            else:
+                f.write("_(No pages successfully scraped to generate table of contents)_\n")
+            
+            f.write("\n---\n\n")
+            
+            # Write each page's content if pages exist
+            if data.get('pages'):
+                for i, page in enumerate(data['pages']):
+                    anchor = f"page-{i+1}-{page.get('title', 'untitled').lower().replace(' ', '-').replace('/', '')}"
+                    anchor = re.sub(r'[^a-z0-9-]', '', anchor) # Sanitize anchor
+                    # Add an anchor target div for robustness
+                    f.write(f'<div id="{anchor}"></div>\n') 
+                    f.write(f"# {page.get('title', 'Untitled')}\n")
+                    f.write(f"*Source: [{page.get('url')}]({page.get('url')})*\n\n")
+                    f.write(page.get('content', '_No content extracted_'))
+                    f.write("\n\n---\n\n")
+            else:
+                f.write("_No content extracted for any pages._\n")
+
+        logging.info(f"Markdown data saved to: {filename}")
+    except IOError as e:
+        logging.error(f"Error saving Markdown file {filename}: {e}")
+# --- End Restore Saving Functions --- 
+
+def download_page_direct(url):
+    """Attempt to download and extract content directly using requests without a browser."""
+    logging.info(f"Attempting direct download of: {url}")
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://support.mambu.com/docs',
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            logging.error(f"Failed to download {url}: HTTP status {response.status_code}")
+            return None
+            
+        logging.info(f"Successfully downloaded {url} (content size: {len(response.text)} bytes)")
+        
+        # Parse the HTML
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Extract title
+        title = None
+        title_selectors = ['h1', '.page-title', '.documentation-title', '.doc-title', '.content_block_article_head h1'] 
+        for selector in title_selectors:
+            title_elem = soup.select_one(selector)
+            if title_elem:
+                title = title_elem.text.strip()
+                logging.info(f"Extracted title directly: '{title}'")
+                break
+                
+        if not title:
+            title = "Untitled"
+            logging.warning(f"Could not extract title directly from {url}, using 'Untitled'.")
+        
+        # Extract content
+        content_selectors = [
+            '.content_block_text',
+            'article.content', 
+            'main[role="main"]', 
+            '#main-content',
+            '.article-body',
+            'div[itemprop="articleBody"]',
+        ]
+        
+        main_content = None
+        for selector in content_selectors:
+            main_content = soup.select_one(selector)
+            if main_content:
+                logging.info(f"Found content container using selector: '{selector}' via direct download")
+                break
+        
+        if not main_content:
+            logging.warning(f"No content container found in direct download of {url}")
+            return None
+            
+        # First try html2text for a nicely formatted result
+        content_md = ""
+        try:
+            container_html = str(main_content)
+            h = html2text.HTML2Text()
+            h.ignore_links = False
+            h.ignore_images = True
+            content_md = h.handle(container_html).strip()
+            logging.info(f"Successfully converted direct download content to Markdown (length: {len(content_md)})")
+        except Exception as HtEx:
+            logging.error(f"html2text conversion failed for direct download content: {str(HtEx)}")
+            # Fall back to simple text extraction
+            content_md = ""
+            
+        # If html2text failed, try simple text extraction
+        if not content_md:
+            logging.warning("html2text failed on direct download content. Falling back to simple text extraction.")
+            try:
+                content_md = main_content.get_text(separator='\n', strip=True)
+                if content_md:
+                    logging.info(f"Successfully extracted text using simple fallback (length: {len(content_md)})")
                 else:
-                    f.write("*(No page content to display)*\n\n")
+                    logging.warning("Simple text extraction fallback also yielded no content from direct download")
+            except Exception as fallback_ex:
+                logging.error(f"Error during fallback text extraction from direct download: {fallback_ex}")
+        
+        if not content_md.strip():
+            logging.warning(f"No content extracted from direct download of {url}")
+            return None
+            
+        logging.info(f"Successfully extracted content via direct download from {url} (length: {len(content_md)})")
+        return {
+            'url': url,
+            'title': title,
+            'content': content_md
+        }
+        
+    except Exception as e:
+        logging.error(f"Error during direct download of {url}: {str(e)}")
+        return None
 
-            logging.info(f"Markdown documentation saved to: {md_file}")
-
-        except IOError as e:
-            logging.error(f"Failed to write Markdown file {md_file}: {e}")
-        except Exception as e:
-             logging.error(f"An unexpected error occurred writing Markdown file: {e}", exc_info=True)
-
-
-        # --- Write JSON File ---
-        try:
-            # Prepare data structure for JSON output
-            json_output = {
-                'scrape_timestamp': self.documentation['timestamp'],
-                'generated_timestamp': datetime.now().isoformat(),
-                'base_url': self.base_url,
-                'total_pages_scraped': len(unique_pages),
-                'pages': unique_pages, # Already sorted and deduplicated
-                'common_sections': {k: sorted(list(set(v))) for k, v in self.documentation['common_sections'].items()} # Deduplicate common sections too
-            }
-            # Write the dictionary to a JSON file with indentation
-            with open(json_file, 'w', encoding='utf-8') as f:
-                json.dump(json_output, f, indent=2, ensure_ascii=False)
-            logging.info(f"JSON documentation saved to: {json_file}")
-
-        except IOError as e:
-            logging.error(f"Failed to write JSON file {json_file}: {e}")
-        except TypeError as e:
-             logging.error(f"Data serialization error writing JSON file: {e}", exc_info=True)
-        except Exception as e:
-             logging.error(f"An unexpected error occurred writing JSON file: {e}", exc_info=True)
-
-
-    def run(self):
-        """Main execution method orchestrating the scraping process."""
-        start_time = time.time()
-        logging.info("Starting Mambu documentation scraper run...")
-        try:
-            # Set up the headless browser
-            self._setup_browser()
-
-            # Discover all documentation links starting from the base URL
-            doc_links = self.get_all_doc_links()
-
-            # Check if links were found
-            if not doc_links:
-                 logging.warning("No documentation links found. Exiting.")
-                 return # Exit if no links
-
-            logging.info(f"Found {len(doc_links)} potential documentation pages to scrape.")
-
-            # Process the discovered URLs in parallel to extract content
-            self.process_urls_parallel(list(doc_links)) # Convert set to list for executor
-
-            # Save the collected and processed documentation
-            self.save_documentation()
-
-            logging.info("Documentation scraping run completed successfully!")
-
-        except Exception as e:
-            # Log any critical error during the run
-            logging.critical(f"A critical error occurred during the scraper run: {e}", exc_info=True)
-        finally:
-            # Ensure browser resources are always cleaned up
-            self._cleanup_browser()
-            end_time = time.time()
-            logging.info(f"Scraper run finished in {end_time - start_time:.2f} seconds.")
-
-# --- Main Execution Block ---
 def main():
-    """Entry point for the script."""
-    # Create an instance of the scraper
-    # Adjust max_workers based on your system resources and network.
-    # Adjust calls_per_second based on the website's tolerance (start low).
-    scraper = MambuScraper(max_workers=5, calls_per_second=2)
-    # Start the scraping process
-    scraper.run()
+    parser = argparse.ArgumentParser(description="Scrape Mambu documentation.")
+    parser.add_argument("--start_url", default="https://support.mambu.com/docs", help="The starting URL for scraping.")
+    parser.add_argument("--max_depth", type=int, default=100, help="Maximum depth for crawling links from the start URL. Set to 0 to only scrape the start_url itself.")
+    parser.add_argument("--output_dir", default=".", help="Directory to save the output files.")
+    parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level.")
+    
+    args = parser.parse_args()
+    
+    setup_logging(args.log_level)
+    logging.info("Starting Mambu documentation scraper...")
+    logging.info(f"Start URL: {args.start_url}")
+    logging.info(f"Max Depth: {args.max_depth}")
+    logging.info(f"Output Directory: {args.output_dir}")
+    logging.info(f"Log Level: {args.log_level}")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    driver = None
+    try:
+        driver = setup_driver()
+        start_time = datetime.now()
+        
+        # Determine links to scrape
+        if args.max_depth == 0 and args.start_url != "https://support.mambu.com/docs":
+            # Special case: Scrape only the specified start_url
+            logging.info(f"Max depth is 0. Scraping ONLY the specified start URL: {args.start_url}")
+            links_to_scrape = [args.start_url]
+            total_links_found = 1
+        else:
+            # Normal case: Collect links based on start_url and max_depth
+            logging.info("Collecting documentation links...")
+            doc_links = get_all_doc_links(driver, args.start_url)
+            total_links_found = len(doc_links)
+            logging.info(f"Found {total_links_found} unique documentation pages.")
+            
+            # Limit the number of pages to scrape based on internal setting
+            max_pages_limit = 10
+            links_to_scrape = list(doc_links)[:max_pages_limit]
+            if len(links_to_scrape) < total_links_found:
+                logging.info(f"Limiting scrape to the first {len(links_to_scrape)} pages based on internal test limit.")
+            else:
+                logging.info(f"Preparing to scrape all {len(links_to_scrape)} found pages.")
+        
+        documentation = {'pages': [], 'scrape_timestamp': start_time.isoformat()}
+        scraped_count = 0
+        
+        if not links_to_scrape:
+            logging.warning("No links found or determined to scrape. Exiting.")
+        else:
+            logging.info(f"Starting scraping process for {len(links_to_scrape)} page(s)...")
+            for i, url in enumerate(links_to_scrape):
+                logging.info(f"Scraping page {i+1}/{len(links_to_scrape)}: {url}")
+                
+                # Use the PDF extraction method
+                page_data = extract_page_content(driver, url)
+                
+                # Fall back to other methods if PDF extraction fails
+                if not page_data:
+                    logging.info(f"PDF extraction failed, attempting with direct download.")
+                    page_data = download_page_direct(url)
+                    
+                    if not page_data:
+                        logging.info(f"Direct download failed, attempting with browser automation.")
+                        page_data = extract_page_content(driver, url)
+                
+                if page_data:
+                    documentation['pages'].append(page_data)
+                    scraped_count += 1
+                    logging.info(f"Successfully scraped and added: {url}")
+                else:
+                    logging.warning(f"Failed to extract content for: {url}")
+                
+                # Add a small delay between requests
+                time.sleep(1)
+        
+        # Save the results
+        timestamp = start_time.strftime("%Y%m%d_%H%M%S")
+        json_filename = os.path.join(args.output_dir, f"mambu_documentation_{timestamp}.json")
+        md_filename = os.path.join(args.output_dir, f"mambu_documentation_{timestamp}.md")
+        
+        logging.info(f"Saving results to {json_filename} and {md_filename}")
+        save_as_json(documentation, json_filename)
+        save_as_markdown(documentation, md_filename, total_links_found)
+        
+        end_time = datetime.now()
+        duration = end_time - start_time
+        logging.info(f"Documentation scraping finished in {duration}")
+        logging.info(f"Successfully scraped {scraped_count}/{len(links_to_scrape)} pages.")
+    
+    except Exception as e:
+        logging.critical(f"An unexpected error occurred: {e}", exc_info=True)
+    finally:
+        if driver:
+            driver.quit()
+            logging.info("Browser closed.")
 
 if __name__ == "__main__":
-    # Ensure the main function is called only when the script is executed directly
-    main()
+    main() 
