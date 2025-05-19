@@ -43,6 +43,17 @@ mambu_documentation_*.json
 mambu_documentation_*.md
 mambu_scraper.log
 mambu_api_scraper.log
+debug_page_source_*.html
+docker_output/
+pdf_downloads/
+mambu-scraper-batch-job.json
+
+# Credentials and sensitive information
+drive_service_account_credentials.json
+*credentials*.json
+*secret*.json
+*token*.json
+*auth*.json
 
 # OS specific
 .DS_Store
@@ -106,3 +117,14 @@ target/
 # IPython
 profile_default/
 ipython_config.py
+
+# Logs
+*.log
+
+# Environment files
+.env
+*.env
+
+# Chrome drivers
+chromedriver_bin/
+chromedriver

@@ -3,4 +3,11 @@ beautifulsoup4==4.12.3
 requests==2.31.0
 webdriver-manager==4.0.1
 certifi==2024.2.2
-urllib3==2.2.1 
+urllib3==2.2.1
+html2text
+PyPDF2
+undetected-chromedriver
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+Flask==3.0.3 
