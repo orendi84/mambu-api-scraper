@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
+env/
 build/
 develop-eggs/
 dist/
@@ -15,27 +16,37 @@ lib64/
 parts/
 sdist/
 var/
-wheels/
-share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Virtual Environment
+.env
+.venv
 venv/
 ENV/
-env/
-env.bak/
-venv.bak/
-.venv
-.env
+.python-version
+
+# Google Drive credentials
+drive_service_account_credentials.json
+
+# Output files
+mambu_api_output/
+output/
+*.log
 
 # IDE
 .idea/
 .vscode/
 *.swp
-*.swo
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
 
 # Project specific
 cache/
@@ -49,7 +60,6 @@ pdf_downloads/
 mambu-scraper-batch-job.json
 
 # Credentials and sensitive information
-drive_service_account_credentials.json
 *credentials*.json
 *secret*.json
 *token*.json
