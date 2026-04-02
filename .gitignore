@@ -52,8 +52,11 @@ Thumbs.db
 cache/
 mambu_documentation_*.json
 mambu_documentation_*.md
+mambu_api_docs_*.json
+mambu_api_docs_*.md
 mambu_scraper.log
 mambu_api_scraper.log
+mambu_openapi_fetcher.log
 debug_page_source_*.html
 docker_output/
 pdf_downloads/

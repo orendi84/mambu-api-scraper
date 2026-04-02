@@ -1,143 +1,68 @@
-# Mambu API Documentation Scraper
+# Mambu API Documentation Fetcher
 
-A tool for scraping API documentation from `api.mambu.com` and uploading it to Google Drive.
+Fetches structured OpenAPI specs directly from Mambu's discovery API. Produces a merged JSON file and formatted Markdown documentation.
 
-## Features
+The old Selenium-based scraper has been replaced. Mambu exposes per-resource OpenAPI 3.x specs through a discovery endpoint, so there's no need to scrape rendered HTML.
 
-- Scrapes documentation from Mambu API websites (v1, v2, payments, streaming)
-- Extracts content into JSON and Markdown formats
-- Uploads to Google Drive with versioning (archive old files)
-- Supports running locally or in Docker container
-- Configurable via environment variables
+## How it works
+
+1. Queries `GET /api/swagger/resources` on a Mambu tenant to discover all 87+ API resources
+2. Fetches each resource's OpenAPI 3.x spec via `GET /api/openapi/resources/{name}/v2`
+3. Optionally fetches the Streaming API spec (static URL)
+4. Merges everything into a single JSON file and a formatted Markdown file
 
 ## Setup
 
-### Prerequisites
-
-- Python 3.9+
-- Docker (for container mode)
-- Google Drive Service Account credentials
-
-### Installation
-
-1. Clone this repository:
-   ```bash
-   git clone <repository-url>
-   cd mambu-scraper
-   ```
-
-2. Create and activate a virtual environment (for local execution):
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
-
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. Set up Google Drive credentials:
-   - Place your Google Drive service account JSON credentials file in the project root as `drive_service_account_credentials.json`
-   - Share your target and archive Google Drive folders with the service account email
-   - Note the folder IDs for both folders
-
-### Configuration
-
-Create a `.env` file based on `.env.example`:
-
 ```bash
-cp .env.example .env
-```
-
-Edit the `.env` file to include your specific settings:
-
-```
-# API Configuration
-API_VERSION=v2    # Options: v1, v2, payments, streaming
-LOG_LEVEL=DEBUG   # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
-LANGUAGE=all      # Options: all, curl, http, javascript, ruby, python, java, go, php
-
-# Output Configuration  
-OUTPUT_DIR=./mambu_api_output
-DELAY_BETWEEN_PAGES=1.0
-
-# Google Drive Configuration
-GOOGLE_DRIVE_TARGET_FOLDER_ID=your_target_folder_id
-GOOGLE_DRIVE_ARCHIVE_FOLDER_ID=your_archive_folder_id
-
-# Docker Configuration
-RUNNING_IN_DOCKER=false
-
-# Google Service Account
-GOOGLE_APPLICATION_CREDENTIALS=drive_service_account_credentials.json
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ## Usage
 
-### Running Locally
-
-Use the run_local.sh script:
+Default (uses Mambu's public demo tenant, no auth needed):
 
 ```bash
-./run_local.sh
+python mambu_openapi_fetcher.py
 ```
 
-Or specify parameters directly:
+With a specific tenant:
 
 ```bash
-./run_local.sh --api-version=v2 --log-level=DEBUG --language=all
+python mambu_openapi_fetcher.py --tenant your-tenant.mambu.com
 ```
 
-### Running in Docker
-
-Build the Docker image:
+With authentication (for enriched specs with custom fields):
 
 ```bash
-docker build --platform linux/amd64 -t mambu-api-scraper .
+python mambu_openapi_fetcher.py --tenant your-tenant.mambu.com --auth user:password
 ```
 
-Run the container using the run_docker.sh script:
+Options:
 
-```bash
-./run_docker.sh
 ```
-
-Or specify parameters directly:
-
-```bash
-./run_docker.sh --api-version=v2 --log-level=DEBUG --language=all
+--tenant         Mambu tenant hostname (default: demotenant.dev.mambucloud.com)
+--auth           Basic auth as user:password (optional)
+--output-dir     Output directory (default: current)
+--no-streaming   Exclude Streaming API
 ```
 
 ## Output
 
-The scraper generates:
-- JSON data with all extracted content
-- Markdown formatted documentation
-- Both files are saved locally and the Markdown is uploaded to Google Drive
+- `mambu_api_docs_{timestamp}.json` - All OpenAPI specs merged into one JSON file (~5-10 MB)
+- `mambu_api_docs_{timestamp}.md` - Formatted Markdown documentation
+- `mambu_openapi_fetcher.log` - Execution log
 
-Output files are stored in:
-- Local: `./mambu_api_output/` directory
-- Google Drive: In the target folder specified by `GOOGLE_DRIVE_TARGET_FOLDER_ID`
+Runtime: under 2 minutes.
 
-## Customization
+## Quality gates
 
-- Edit `website_scraper.py` to change the extraction logic
-- Edit `mambu_api_scraper.py` to modify API-specific behavior
-- Adjust environment variables for different API versions or languages
-
-## Troubleshooting
-
-### Common Issues
-
-- **ChromeDriver not found:** Make sure you're using a compatible Chrome/Chromium version
-- **Google Drive permissions:** Ensure the service account has Editor access to both folders
-- **Environment variables:** Check .env file or command-line parameters are correctly set
-
-### Logs
-
-Logs are printed to stdout. Set `LOG_LEVEL=DEBUG` for detailed debugging information.
+- Fails if more than 10% of resources can't be fetched
+- Validates each spec has an `openapi` or `swagger` field
+- Warns if output exceeds 100 MB (likely a bug)
+- Logs endpoint count per resource for verification
 
 ## License
 
-[Your License Here]
+MIT
