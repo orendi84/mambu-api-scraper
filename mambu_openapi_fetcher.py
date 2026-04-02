@@ -129,6 +129,71 @@ def count_endpoints(spec):
     return count
 
 
+def resolve_ref(spec, ref):
+    """Resolve a $ref pointer within the spec."""
+    if not ref or not ref.startswith("#/"):
+        return None
+    parts = ref.lstrip("#/").split("/")
+    obj = spec
+    for part in parts:
+        obj = obj.get(part, {})
+    return obj if obj else None
+
+
+def schema_to_markdown(schema, spec, indent=0, seen=None):
+    """Render a schema as a markdown property table."""
+    if seen is None:
+        seen = set()
+
+    lines = []
+    prefix = "  " * indent
+
+    # Resolve $ref
+    if "$ref" in schema:
+        ref_name = schema["$ref"].split("/")[-1]
+        if ref_name in seen:
+            return [f"{prefix}*{ref_name} (circular reference)*"]
+        seen = seen | {ref_name}
+        resolved = resolve_ref(spec, schema["$ref"])
+        if resolved:
+            schema = resolved
+        else:
+            return [f"{prefix}*{ref_name}*"]
+
+    # Handle array type
+    if schema.get("type") == "array" and "items" in schema:
+        lines.append(f"{prefix}*Array of:*")
+        lines.extend(schema_to_markdown(schema["items"], spec, indent, seen))
+        return lines
+
+    # Handle object with properties
+    properties = schema.get("properties", {})
+    required_fields = set(schema.get("required", []))
+    if properties:
+        lines.append(f"{prefix}| Property | Type | Required | Description |")
+        lines.append(f"{prefix}|----------|------|----------|-------------|")
+        for prop_name, prop_schema in sorted(properties.items()):
+            ptype = prop_schema.get("type", "")
+            if "$ref" in prop_schema:
+                ptype = prop_schema["$ref"].split("/")[-1]
+            elif ptype == "array" and "items" in prop_schema:
+                items = prop_schema["items"]
+                if "$ref" in items:
+                    ptype = f"array[{items['$ref'].split('/')[-1]}]"
+                else:
+                    ptype = f"array[{items.get('type', 'object')}]"
+            req = "Yes" if prop_name in required_fields else "No"
+            desc = prop_schema.get("description", "").replace("\n", " ").replace("|", "\\|")
+            if prop_schema.get("enum"):
+                desc += f" Enum: {', '.join(str(v) for v in prop_schema['enum'])}"
+            if prop_schema.get("example") is not None:
+                desc += f" Example: `{prop_schema['example']}`"
+            lines.append(f"{prefix}| {prop_name} | {ptype} | {req} | {desc} |")
+        lines.append("")
+
+    return lines
+
+
 def spec_to_markdown(label, spec):
     """Convert a single OpenAPI spec to markdown."""
     lines = []
@@ -171,35 +236,99 @@ def spec_to_markdown(label, spec):
                 for p in params:
                     name = p.get("name", "")
                     location = p.get("in", "")
-                    schema = p.get("schema", {})
-                    ptype = schema.get("type", p.get("type", ""))
+                    pschema = p.get("schema", {})
+                    ptype = pschema.get("type", p.get("type", ""))
                     required = "Yes" if p.get("required") else "No"
                     desc = p.get("description", "").replace("\n", " ").replace("|", "\\|")
+                    if pschema.get("enum"):
+                        desc += f" Enum: {', '.join(str(v) for v in pschema['enum'])}"
+                    if pschema.get("example") is not None:
+                        desc += f" Example: `{pschema['example']}`"
                     lines.append(f"| {name} | {location} | {ptype} | {required} | {desc} |")
                 lines.append("")
 
-            # Request body
+            # Request body with schema details
             request_body = details.get("requestBody", {})
             if request_body:
                 content = request_body.get("content", {})
                 for content_type, schema_info in content.items():
-                    ref = schema_info.get("schema", {}).get("$ref", "")
+                    req_schema = schema_info.get("schema", {})
+                    ref = req_schema.get("$ref", "")
                     if ref:
                         schema_name = ref.split("/")[-1]
-                        lines.append(f"**Request Body:** `{content_type}` - [{schema_name}](#{schema_name})")
+                        lines.append(f"**Request Body:** `{content_type}` - {schema_name}")
+                        lines.append("")
+                        resolved = resolve_ref(spec, ref)
+                        if resolved:
+                            lines.extend(schema_to_markdown(resolved, spec))
+                    elif req_schema:
+                        lines.append(f"**Request Body:** `{content_type}`")
+                        lines.append("")
+                        lines.extend(schema_to_markdown(req_schema, spec))
+                    # Render example if present
+                    example = schema_info.get("example") or req_schema.get("example")
+                    if example:
+                        lines.append("**Request Example:**")
+                        lines.append("")
+                        lines.append("```json")
+                        lines.append(json.dumps(example, indent=2))
+                        lines.append("```")
                         lines.append("")
 
-            # Responses
+            # Responses with schema details
             responses = details.get("responses", {})
             if responses:
                 lines.append("**Responses:**")
                 lines.append("")
-                lines.append("| Code | Description |")
-                lines.append("|------|-------------|")
                 for code, resp_info in sorted(responses.items()):
-                    desc = resp_info.get("description", "").replace("\n", " ").replace("|", "\\|")
-                    lines.append(f"| {code} | {desc} |")
+                    desc = resp_info.get("description", "").replace("\n", " ")
+                    lines.append(f"**{code}** - {desc}")
+                    lines.append("")
+                    content = resp_info.get("content", {})
+                    for ct, ct_info in content.items():
+                        resp_schema = ct_info.get("schema", {})
+                        if resp_schema:
+                            # Show schema for success responses
+                            if code.startswith("2") or code == "102":
+                                if "$ref" in resp_schema:
+                                    resolved = resolve_ref(spec, resp_schema["$ref"])
+                                    if resolved:
+                                        lines.extend(schema_to_markdown(resolved, spec))
+                                elif resp_schema.get("type") == "array" and "items" in resp_schema:
+                                    items = resp_schema["items"]
+                                    if "$ref" in items:
+                                        ref_name = items["$ref"].split("/")[-1]
+                                        lines.append(f"*Array of {ref_name}:*")
+                                        lines.append("")
+                                        resolved = resolve_ref(spec, items["$ref"])
+                                        if resolved:
+                                            lines.extend(schema_to_markdown(resolved, spec))
+                                    else:
+                                        lines.extend(schema_to_markdown(resp_schema, spec))
+                        # Render example if present
+                        example = ct_info.get("example") or resp_schema.get("example")
+                        if example:
+                            lines.append("**Response Example:**")
+                            lines.append("")
+                            lines.append("```json")
+                            lines.append(json.dumps(example, indent=2))
+                            lines.append("```")
+                            lines.append("")
+
+    # Component schemas section
+    schemas = spec.get("components", {}).get("schemas", {})
+    if schemas:
+        lines.append("---")
+        lines.append("")
+        lines.append(f"### Schemas")
+        lines.append("")
+        for schema_name, schema_def in sorted(schemas.items()):
+            lines.append(f"#### {schema_name}")
+            lines.append("")
+            if schema_def.get("description"):
+                lines.append(schema_def["description"].strip())
                 lines.append("")
+            lines.extend(schema_to_markdown(schema_def, spec))
 
     return "\n".join(lines)
 
