@@ -11,6 +11,9 @@ Usage:
     python mambu_openapi_fetcher.py --tenant your-tenant.mambu.com
     python mambu_openapi_fetcher.py --tenant your-tenant.mambu.com --auth user:pass
     python mambu_openapi_fetcher.py --no-streaming
+    python mambu_openapi_fetcher.py --from-json output/mambu_api_docs_20260402_155845.json
+    python mambu_openapi_fetcher.py --list-resources
+    python mambu_openapi_fetcher.py --resources "clients,loans"
 
 Authentication via environment variable (preferred - avoids shell history leakage):
     export MAMBU_AUTH=user:password
@@ -18,12 +21,13 @@ Authentication via environment variable (preferred - avoids shell history leakag
 """
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
 import re
 import sys
-import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin
@@ -239,6 +243,107 @@ def github_anchor(label, seen_counts):
     return f"{base}-{count}"
 
 
+def slugify_filename(label, seen_counts):
+    """Produce a filesystem-safe slug from label for split .md filenames.
+
+    Lowercases, replaces non-alphanumeric characters with hyphens,
+    collapses runs of hyphens, strips leading/trailing hyphens.
+    Deduplicates collisions with -1, -2 suffixes (first occurrence keeps no suffix).
+
+    seen_counts is a dict mutated in place to track usage counts.
+    """
+    slug = label.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = slug.strip("-")
+    # Collapse any internal runs (the regex above already collapses, but be safe)
+    slug = re.sub(r"-+", "-", slug)
+    if not slug:
+        slug = "resource"
+
+    base = slug
+    count = seen_counts.get(base, 0)
+    seen_counts[base] = count + 1
+    if count == 0:
+        return base
+    return f"{base}-{count}"
+
+
+def md_cell(value):
+    """Coerce value to str and make it safe for a markdown table cell.
+
+    Replaces newlines with spaces and escapes pipe characters as \\|.
+    """
+    s = str(value)
+    s = s.replace("\n", " ")
+    s = s.replace("|", "\\|")
+    return s
+
+
+def filter_resources(resources, csv_filter):
+    """Filter resources list by comma-separated case-insensitive substring matches against labels.
+
+    Returns (matched, available_labels).
+    matched is the filtered list (preserving original order).
+    available_labels is the list of all labels before filtering.
+    """
+    available_labels = [r.get("label", "") for r in resources]
+    filters = [f.strip().lower() for f in csv_filter.split(",") if f.strip()]
+    matched = [
+        r for r in resources
+        if any(f in r.get("label", "").lower() for f in filters)
+    ]
+    return matched, available_labels
+
+
+def load_saved_output(path):
+    """Load a previously saved output JSON file.
+
+    Returns the parsed dict. Raises ValueError if required fields are missing.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a JSON object at top level, got {type(data).__name__}")
+    if "resources" not in data:
+        raise ValueError("Saved JSON missing 'resources' field")
+    if not isinstance(data["resources"], list):
+        raise ValueError("'resources' field must be a list")
+    return data
+
+
+def merge_allof(schema, spec, seen):
+    """Flatten a schema's allOf composition into (properties, required_set).
+
+    Recurses into sub-schemas that themselves use allOf, so inherited
+    properties from nested compositions are not dropped. The schema's own
+    sibling properties/required are applied last and win over allOf members.
+    seen guards against circular $ref chains.
+    """
+    properties = {}
+    required = set()
+    for sub in schema.get("allOf", []):
+        if not isinstance(sub, dict):
+            continue
+        if "$ref" in sub:
+            ref_name = sub["$ref"].split("/")[-1]
+            if ref_name in seen:
+                continue
+            seen = seen | {ref_name}
+            resolved = resolve_ref(spec, sub["$ref"])
+            if not isinstance(resolved, dict):
+                continue
+            sub = resolved
+        if "allOf" in sub:
+            sub_props, sub_req = merge_allof(sub, spec, seen)
+            properties.update(sub_props)
+            required.update(sub_req)
+        properties.update(sub.get("properties", {}))
+        required.update(sub.get("required", []))
+    properties.update(schema.get("properties", {}))
+    required.update(schema.get("required", []))
+    return properties, required
+
+
 def schema_to_markdown(schema, spec, indent=0, seen=None):
     """Render a schema as a markdown property table."""
     if seen is None:
@@ -258,6 +363,15 @@ def schema_to_markdown(schema, spec, indent=0, seen=None):
             schema = resolved
         else:
             return [f"{prefix}*{ref_name}*"]
+
+    # Handle allOf: flatten the composition, then render as a plain schema
+    if "allOf" in schema:
+        merged_properties, merged_required = merge_allof(schema, spec, seen)
+        merged_schema = {
+            "properties": merged_properties,
+            "required": list(merged_required),
+        }
+        return schema_to_markdown(merged_schema, spec, indent, seen)
 
     # Handle array type
     if schema.get("type") == "array" and "items" in schema:
@@ -282,12 +396,14 @@ def schema_to_markdown(schema, spec, indent=0, seen=None):
                 else:
                     ptype = f"array[{items.get('type', 'object')}]"
             req = "Yes" if prop_name in required_fields else "No"
-            desc = prop_schema.get("description", "").replace("\n", " ").replace("|", "\\|")
+            desc = prop_schema.get("description", "")
             if prop_schema.get("enum"):
-                desc += f" Enum: {', '.join(str(v) for v in prop_schema['enum'])}"
+                desc += f" Enum: {', '.join(md_cell(v) for v in prop_schema['enum'])}"
             if prop_schema.get("example") is not None:
                 desc += f" Example: `{prop_schema['example']}`"
-            lines.append(f"{prefix}| {prop_name} | {ptype} | {req} | {desc} |")
+            lines.append(
+                f"{prefix}| {md_cell(prop_name)} | {md_cell(ptype)} | {md_cell(req)} | {md_cell(desc)} |"
+            )
         lines.append("")
 
     return lines
@@ -351,19 +467,21 @@ def spec_to_markdown(label, spec):
                     p = _resolve_param(spec, raw_p)
                     if p is None:
                         ref_name = raw_p.get("$ref", "?").split("/")[-1]
-                        lines.append(f"| {ref_name} | - | - | - | (unresolvable ref) |")
+                        lines.append(f"| {md_cell(ref_name)} | - | - | - | (unresolvable ref) |")
                         continue
                     name = p.get("name", "")
                     location = p.get("in", "")
                     pschema = p.get("schema", {})
                     ptype = pschema.get("type", p.get("type", ""))
                     required = "Yes" if p.get("required") else "No"
-                    desc = p.get("description", "").replace("\n", " ").replace("|", "\\|")
+                    desc = p.get("description", "")
                     if pschema.get("enum"):
-                        desc += f" Enum: {', '.join(str(v) for v in pschema['enum'])}"
+                        desc += f" Enum: {', '.join(md_cell(v) for v in pschema['enum'])}"
                     if pschema.get("example") is not None:
                         desc += f" Example: `{pschema['example']}`"
-                    lines.append(f"| {name} | {location} | {ptype} | {required} | {desc} |")
+                    lines.append(
+                        f"| {md_cell(name)} | {md_cell(location)} | {md_cell(ptype)} | {md_cell(required)} | {md_cell(desc)} |"
+                    )
                 lines.append("")
 
             # Request body with schema details
@@ -403,20 +521,21 @@ def spec_to_markdown(label, spec):
             if responses:
                 lines.append("**Responses:**")
                 lines.append("")
-                for code, resp_info in sorted(responses.items()):
+                for code, resp_info in sorted(responses.items(), key=lambda kv: str(kv[0])):
+                    code_str = str(code)
                     # resp_info itself may be a $ref
                     if isinstance(resp_info, dict) and "$ref" in resp_info:
                         resolved_ri = resolve_ref(spec, resp_info["$ref"])
                         resp_info = resolved_ri if isinstance(resolved_ri, dict) else {}
                     desc = resp_info.get("description", "").replace("\n", " ")
-                    lines.append(f"**{code}** - {desc}")
+                    lines.append(f"**{code_str}** - {desc}")
                     lines.append("")
                     content = resp_info.get("content", {})
                     for ct, ct_info in content.items():
                         resp_schema = ct_info.get("schema", {})
                         if resp_schema:
                             # Show schema for success responses
-                            if code.startswith("2") or code == "102":
+                            if code_str.startswith("2") or code_str == "102":
                                 if "$ref" in resp_schema:
                                     resolved = resolve_ref(spec, resp_schema["$ref"])
                                     if resolved:
@@ -487,6 +606,50 @@ def build_markdown(output, specs_with_labels):
     return "\n".join(lines)
 
 
+def write_split_markdown(output, specs_with_labels, output_dir, timestamp):
+    """Write per-resource .md files plus an index.md into a split directory.
+
+    Returns the split directory Path.
+    """
+    split_dir = output_dir / f"mambu_api_docs_{timestamp}_split"
+    split_dir.mkdir(parents=True, exist_ok=True)
+
+    seen_slug_counts = {}
+    slug_map = []  # list of (label, slug) in order
+
+    for label, _ in specs_with_labels:
+        slug = slugify_filename(label, seen_slug_counts)
+        slug_map.append((label, slug))
+
+    # Write per-resource files
+    for (label, slug), (_, spec) in zip(slug_map, specs_with_labels):
+        content = spec_to_markdown(label, spec)
+        file_path = split_dir / f"{slug}.md"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.write("\n")
+
+    # Write index.md
+    index_lines = []
+    index_lines.append("# Mambu API Documentation - Index")
+    index_lines.append("")
+    index_lines.append(f"*Generated: {output['timestamp']}*")
+    index_lines.append(f"*Tenant: {output['tenant']}*")
+    index_lines.append(f"*Resources: {output['resources_total']} | Endpoints: {output['endpoints_total']}*")
+    index_lines.append("")
+    index_lines.append("## Resources")
+    index_lines.append("")
+    for label, slug in slug_map:
+        index_lines.append(f"- [{label}]({slug}.md)")
+    index_lines.append("")
+
+    index_path = split_dir / "index.md"
+    with open(index_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(index_lines))
+
+    return split_dir
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch Mambu API documentation via OpenAPI specs")
     parser.add_argument("--tenant", default=DEFAULT_TENANT, help=f"Mambu tenant hostname (default: {DEFAULT_TENANT})")
@@ -504,14 +667,112 @@ def main():
     # Deprecated no-op kept so existing callers that passed it don't break;
     # streaming was always on by default.
     parser.add_argument("--include-streaming", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of parallel workers for fetching specs (default: 4, min: 1)",
+    )
+    parser.add_argument(
+        "--pretty-json",
+        action="store_true",
+        help="Write JSON output with indent=2 (default: compact)",
+    )
+    parser.add_argument(
+        "--resources",
+        default=None,
+        help="Comma-separated case-insensitive substring filter against resource labels (e.g. 'clients,loans')",
+    )
+    parser.add_argument(
+        "--list-resources",
+        action="store_true",
+        help="Fetch the resource index, print each label and jsonPath, then exit",
+    )
+    parser.add_argument(
+        "--split-md",
+        action="store_true",
+        help="Also write a split directory with one .md per resource plus an index.md",
+    )
+    parser.add_argument(
+        "--from-json",
+        default=None,
+        metavar="FILE",
+        help="Skip network fetching; load a previously saved output JSON and regenerate markdown",
+    )
     args = parser.parse_args()
 
+    # Mutual exclusion: --from-json and --list-resources
+    if args.from_json and args.list_resources:
+        log.error("--from-json and --list-resources are mutually exclusive")
+        sys.exit(1)
+
+    # Clamp workers to minimum 1
+    workers = max(1, args.workers)
+
     include_streaming = not args.no_streaming
+    json_indent = 2 if args.pretty_json else None
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     setup_logging(output_dir)
+
+    # --from-json mode: skip all network fetching
+    if args.from_json:
+        if args.tenant != DEFAULT_TENANT:
+            log.info("--tenant is ignored in --from-json mode")
+        if args.resources:
+            log.info("--resources is ignored in --from-json mode")
+
+        log.info(f"Loading saved output from {args.from_json}")
+        try:
+            saved = load_saved_output(args.from_json)
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            log.error(f"Failed to load {args.from_json}: {e}")
+            sys.exit(1)
+
+        tenant = saved.get("tenant", "(from-json)")
+        raw_specs = saved["resources"]
+
+        # Recompute totals from loaded specs
+        specs_with_labels = []
+        total_endpoints = 0
+        for entry in raw_specs:
+            label = entry.get("label", "Unknown")
+            spec = entry.get("spec", {})
+            ep_count = count_endpoints(spec)
+            total_endpoints += ep_count
+            specs_with_labels.append((label, spec))
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        output = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tenant": tenant,
+            "resources_total": len(specs_with_labels),
+            "resources_failed": saved.get("resources_failed", 0),
+            "endpoints_total": total_endpoints,
+            "resources": raw_specs,
+        }
+
+        # Markdown only: re-writing the JSON we just loaded would duplicate it
+        # Write combined markdown
+        md_content = build_markdown(output, specs_with_labels)
+        md_file = output_dir / f"mambu_api_docs_{timestamp}.md"
+        with open(md_file, "w", encoding="utf-8") as f:
+            f.write(md_content)
+        log.info(f"Markdown saved: {md_file} ({md_file.stat().st_size / 1024:.0f} KB)")
+
+        # Write split markdown if requested
+        if args.split_md:
+            split_dir = write_split_markdown(output, specs_with_labels, output_dir, timestamp)
+            split_count = len(list(split_dir.glob("*.md")))
+            log.info(f"Split markdown written: {split_dir} ({split_count} files)")
+
+        log.info("=" * 60)
+        log.info(f"Done (from-json). {len(specs_with_labels)} resources, {total_endpoints} endpoints")
+        log.info(f"Markdown: {md_file}")
+        log.info("=" * 60)
+        return
 
     log.info(f"Fetching Mambu API docs from {args.tenant}")
 
@@ -539,24 +800,78 @@ def main():
         log.error("Resource index is empty")
         sys.exit(1)
 
-    # Step 2: Fetch each spec
-    specs = []
+    # --list-resources mode: print and exit
+    if args.list_resources:
+        for r in resources:
+            label = r.get("label", "")
+            json_path = r.get("jsonPath", "")
+            print(f"{label}\t{json_path}")
+        sys.exit(0)
+
+    # --resources filter (applied after --list-resources check)
+    if args.resources:
+        resources, available_labels = filter_resources(resources, args.resources)
+        if not resources:
+            log.error(
+                f"--resources filter '{args.resources}' matched no resources. "
+                f"Available labels: {', '.join(available_labels)}"
+            )
+            sys.exit(1)
+        log.info(f"Filtered to {len(resources)} resources matching '{args.resources}'")
+
+    # Step 2: Fetch specs concurrently
+    # requests.Session is not thread-safe; use threading.local() so each
+    # worker thread builds its own session.
+    _thread_local = threading.local()
+
+    def get_thread_session():
+        if not hasattr(_thread_local, "session"):
+            _thread_local.session = build_session(auth_tuple)
+        return _thread_local.session
+
+    def fetch_worker(args_tuple):
+        """Fetch one spec; returns (index, label, json_path, spec_or_None)."""
+        index, label, json_path = args_tuple
+        if not json_path:
+            return (index, label, json_path, None, "no_jsonpath")
+        sess = get_thread_session()
+        spec = fetch_spec(sess, base_url, json_path, label)
+        return (index, label, json_path, spec, "ok")
+
+    # Build work items - no-jsonPath resources still submitted and counted as failures
+    work_items = []
+    for i, resource in enumerate(resources):
+        label = resource.get("label", f"Resource {i + 1}")
+        json_path = resource.get("jsonPath", "")
+        work_items.append((i, label, json_path))
+
+    # denominator = all attempted resources (including no-jsonPath skips)
+    resources_attempted = len(work_items)
+
+    results = [None] * resources_attempted  # preserve original order
+
     failures = 0
     total_endpoints = 0
+    specs = []
 
-    for i, resource in enumerate(resources, 1):
-        label = resource.get("label", f"Resource {i}")
-        json_path = resource.get("jsonPath", "")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_item = {executor.submit(fetch_worker, item): item for item in work_items}
+        for future in concurrent.futures.as_completed(future_to_item):
+            orig_index, label, json_path = future_to_item[future]
+            try:
+                orig_index, label, json_path, spec, status = future.result()
+            except Exception as e:
+                log.warning(f"Worker crashed fetching {label}: {e}")
+                spec, status = None, "error"
+            results[orig_index] = (label, json_path, spec, status)
 
-        if not json_path:
-            log.warning(f"[{i}/{len(resources)}] Skipping {label}: no jsonPath found")
+    # Aggregate in original resource order (main thread only)
+    for i, (label, json_path, spec, status) in enumerate(results):
+        resource_num = i + 1
+        if status == "no_jsonpath":
+            log.warning(f"[{resource_num}/{resources_attempted}] Skipping {label}: no jsonPath found")
             failures += 1
-            continue
-
-        log.info(f"[{i}/{len(resources)}] Fetching {label}...")
-        spec = fetch_spec(session, base_url, json_path, label)
-
-        if spec:
+        elif spec is not None:
             ep_count = count_endpoints(spec)
             total_endpoints += ep_count
             specs.append({
@@ -565,21 +880,21 @@ def main():
                 "endpoints": ep_count,
                 "spec": spec,
             })
-            log.info(f"  -> {ep_count} endpoints")
+            log.info(f"[{resource_num}/{resources_attempted}] {label} -> {ep_count} endpoints")
         else:
             failures += 1
-            log.warning(f"  -> FAILED")
+            log.warning(f"[{resource_num}/{resources_attempted}] {label} -> FAILED")
 
-        # Be polite
-        time.sleep(0.2)
-
-    # Quality gate
-    failure_ratio = failures / len(resources) if resources else 1
+    # Quality gate: denominator = resources actually attempted
+    failure_ratio = failures / resources_attempted if resources_attempted else 1
     if failure_ratio > MAX_FAILURE_RATIO:
-        log.error(f"Too many failures: {failures}/{len(resources)} ({failure_ratio:.0%}) exceeds {MAX_FAILURE_RATIO:.0%} threshold")
+        log.error(
+            f"Too many failures: {failures}/{resources_attempted} ({failure_ratio:.0%}) "
+            f"exceeds {MAX_FAILURE_RATIO:.0%} threshold"
+        )
         sys.exit(1)
 
-    # Step 3: Streaming API
+    # Step 3: Streaming API (outside the failure gate, not subject to --resources filter)
     streaming_spec = None
     if include_streaming:
         streaming_spec = fetch_streaming_api(session)
@@ -604,10 +919,10 @@ def main():
         "resources": specs,
     }
 
-    # Save JSON
+    # Save JSON (compact by default, --pretty-json restores indent=2)
     json_file = output_dir / f"mambu_api_docs_{timestamp}.json"
     with open(json_file, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
+        json.dump(output, f, indent=json_indent, ensure_ascii=False)
     json_size = json_file.stat().st_size
     log.info(f"JSON saved: {json_file} ({json_size / 1024 / 1024:.1f} MB)")
 
@@ -615,13 +930,19 @@ def main():
     if json_size > 100 * 1024 * 1024:  # 100 MB
         log.warning(f"Output file is suspiciously large ({json_size / 1024 / 1024:.0f} MB)")
 
-    # Save Markdown
+    # Save combined Markdown
     specs_with_labels = [(s["label"], s["spec"]) for s in specs]
     md_content = build_markdown(output, specs_with_labels)
     md_file = output_dir / f"mambu_api_docs_{timestamp}.md"
     with open(md_file, "w", encoding="utf-8") as f:
         f.write(md_content)
     log.info(f"Markdown saved: {md_file} ({md_file.stat().st_size / 1024:.0f} KB)")
+
+    # Save split markdown if requested
+    if args.split_md:
+        split_dir = write_split_markdown(output, specs_with_labels, output_dir, timestamp)
+        split_count = len(list(split_dir.glob("*.md")))
+        log.info(f"Split markdown written: {split_dir} ({split_count} files)")
 
     # Summary
     log.info("=" * 60)
