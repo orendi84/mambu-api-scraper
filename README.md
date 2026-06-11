@@ -39,20 +39,28 @@ With authentication (for enriched specs with custom fields):
 python mambu_openapi_fetcher.py --tenant your-tenant.mambu.com --auth user:password
 ```
 
+Prefer the `MAMBU_AUTH` environment variable over `--auth` when running in scripts or CI. CLI
+arguments appear in shell history and `ps` output; the env var does not:
+
+```bash
+export MAMBU_AUTH=user:password
+python mambu_openapi_fetcher.py --tenant your-tenant.mambu.com
+```
+
 Options:
 
 ```
 --tenant         Mambu tenant hostname (default: demotenant.dev.mambucloud.com)
---auth           Basic auth as user:password (optional)
+--auth           Basic auth as user:password (optional; MAMBU_AUTH env var preferred)
 --output-dir     Output directory (default: current)
---no-streaming   Exclude Streaming API
+--no-streaming   Exclude the Streaming API (included by default)
 ```
 
 ## Output
 
 - `mambu_api_docs_{timestamp}.json` - All OpenAPI specs merged into one JSON file (~5-10 MB)
 - `mambu_api_docs_{timestamp}.md` - Formatted Markdown documentation
-- `mambu_openapi_fetcher.log` - Execution log
+- `mambu_openapi_fetcher.log` - Execution log (written into `--output-dir`)
 
 Runtime: under 2 minutes.
 
@@ -62,6 +70,22 @@ Runtime: under 2 minutes.
 - Validates each spec has an `openapi` or `swagger` field
 - Warns if output exceeds 100 MB (likely a bug)
 - Logs endpoint count per resource for verification
+
+## Running tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Or with the repo's virtualenv:
+
+```bash
+venv/bin/pip install -r requirements-dev.txt
+venv/bin/python -m pytest tests/ -q
+```
+
+The test suite covers only pure functions (no network calls).
 
 ## License
 
