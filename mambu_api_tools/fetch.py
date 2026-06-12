@@ -50,11 +50,73 @@ def derive_openapi_path(json_path):
     return f"openapi/resources/{name}/v{version}"
 
 
+# swagger-core serialization internals that Mambu's endpoints leak into
+# schema objects. They are not valid OpenAPI 3.0 and break validators.
+# jsonSchema is a full duplicate of the schema embedded by swagger-core.
+_SWAGGER_ARTIFACT_KEYS = ("exampleSetFlag", "specVersion", "jsonSchema")
+
+
+def strip_swagger_artifacts(node):
+    """Remove swagger-core internal keys leaked into spec JSON, in place.
+
+    Drops 'exampleSetFlag' and 'specVersion' everywhere; drops 'types' when
+    it is redundant with a sibling 'type', or promotes a single-element
+    'types' list to 'type' when 'type' is absent. Property NAMES are never
+    touched: inside a 'properties' map only the property values are walked.
+    """
+    if isinstance(node, dict):
+        for key in _SWAGGER_ARTIFACT_KEYS:
+            node.pop(key, None)
+        types = node.get("types")
+        if isinstance(types, list):
+            if "type" in node:
+                node.pop("types", None)
+            elif len(types) == 1 and isinstance(types[0], str):
+                node["type"] = types[0]
+                node.pop("types", None)
+        # Some Mambu schemas carry duplicated enum values, which violates
+        # the spec's uniqueItems; dedupe preserving first-seen order.
+        enum = node.get("enum")
+        if isinstance(enum, list) and len(enum) > 1:
+            seen = set()
+            deduped = []
+            for v in enum:
+                marker = json.dumps(v, sort_keys=True, ensure_ascii=False)
+                if marker not in seen:
+                    seen.add(marker)
+                    deduped.append(v)
+            if len(deduped) != len(enum):
+                node["enum"] = deduped
+        # swagger-core wraps vendor extensions in a literal 'extensions'
+        # object instead of inlining x- keys; hoist them to the parent.
+        ext = node.get("extensions")
+        if isinstance(ext, dict) and all(isinstance(k, str) and k.startswith("x-") for k in ext):
+            for k, v in ext.items():
+                node.setdefault(k, v)
+            node.pop("extensions", None)
+        for key, value in node.items():
+            if key == "properties" and isinstance(value, dict):
+                for prop_key, prop_value in value.items():
+                    # swagger-core copies the property name into the
+                    # property schema as 'name'; drop it only when it
+                    # provably mirrors the key (parameters keep theirs).
+                    if isinstance(prop_value, dict) and prop_value.get("name") == prop_key:
+                        prop_value.pop("name", None)
+                    strip_swagger_artifacts(prop_value)
+            else:
+                strip_swagger_artifacts(value)
+    elif isinstance(node, list):
+        for item in node:
+            strip_swagger_artifacts(item)
+    return node
+
+
 def fetch_spec(session, base_url, json_path, label):
     """Fetch a single OpenAPI spec via the unauthenticated openapi path.
 
     Falls back to the authenticated jsonPath if the openapi path returns 404
     or if derive_openapi_path cannot produce a valid path.
+    Fetched specs are normalized via strip_swagger_artifacts.
     """
     # Try unauthenticated openapi path first
     openapi_path = derive_openapi_path(json_path)
@@ -67,7 +129,7 @@ def fetch_spec(session, base_url, json_path, label):
             if resp.status_code == 200:
                 spec = resp.json()
                 if "openapi" in spec or "swagger" in spec:
-                    return spec
+                    return strip_swagger_artifacts(spec)
         except Exception as e:
             log.debug(f"openapi path attempt failed for {url}: {e}")
 
@@ -78,7 +140,7 @@ def fetch_spec(session, base_url, json_path, label):
         if resp.status_code == 200:
             spec = resp.json()
             if "openapi" in spec or "swagger" in spec:
-                return spec
+                return strip_swagger_artifacts(spec)
     except Exception as e:
         log.debug(f"jsonPath fallback failed for {url}: {e}")
 
@@ -94,7 +156,7 @@ def fetch_streaming_api(session):
         resp.raise_for_status()
         spec = resp.json()
         log.info(f"Streaming API: {len(spec.get('paths', {}))} endpoints")
-        return spec
+        return strip_swagger_artifacts(spec)
     except Exception as e:
         log.warning(f"Failed to fetch Streaming API: {e}")
         return None
@@ -144,6 +206,10 @@ def load_saved_output(path):
         raise ValueError("Saved JSON missing 'resources' field")
     if not isinstance(data["resources"], list):
         raise ValueError("'resources' field must be a list")
+    # Snapshots taken before artifact stripping existed may carry leaked
+    # swagger-core internals; normalize on load so replay/diff/scorecard
+    # see the same shape as freshly fetched specs.
+    strip_swagger_artifacts(data["resources"])
     return data
 
 
