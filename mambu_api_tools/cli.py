@@ -345,13 +345,37 @@ def run_diff(args):
 
 
 def _build_scorecard_parser(subparsers):
-    """Placeholder scorecard subcommand."""
+    """scorecard subcommand: API quality scorecard from a saved envelope."""
     parser = subparsers.add_parser(
         "scorecard",
-        help="[Coming soon] Generate API coverage scorecard",
+        help="Generate an API quality scorecard from a saved JSON snapshot",
+        description="Generate an API quality scorecard from a saved JSON snapshot",
     )
-    parser.add_argument("json_file", help="Path to saved JSON output")
+    parser.add_argument("snapshot", help="Path to saved JSON output")
+    parser.add_argument("--output", default=None, metavar="FILE", help="Write markdown to FILE instead of stdout")
     return parser
+
+
+def run_scorecard(args):
+    """Execute the scorecard subcommand with parsed args."""
+    from .scorecard import compute_scorecard, render_scorecard
+
+    try:
+        envelope = load_saved_output(args.snapshot)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        log.error(f"Failed to load scorecard input: {e}")
+        sys.exit(2)
+
+    model = compute_scorecard(envelope)
+    markdown = render_scorecard(model)
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(markdown)
+            f.write("\n")
+        log.info(f"Scorecard written: {args.output}")
+    else:
+        print(markdown)
 
 
 def main():
@@ -373,8 +397,7 @@ def main():
     elif args.command == "diff":
         run_diff(args)
     elif args.command == "scorecard":
-        log.error("scorecard subcommand is not yet implemented")
-        sys.exit(1)
+        run_scorecard(args)
     else:
         parser.print_help()
         sys.exit(1)
