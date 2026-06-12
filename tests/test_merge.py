@@ -252,3 +252,50 @@ def test_merged_document_validates():
     rb_ref = merged["paths"]["/loans"]["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"]
     assert rb_ref == "#/components/schemas/Loans_Client"
     validate(merged)
+
+
+def _spec_with_op(op_id, path="/things", extra_op_keys=None):
+    op = {
+        "operationId": op_id,
+        "responses": {"200": {"description": "ok"}},
+    }
+    if extra_op_keys:
+        op.update(extra_op_keys)
+    return {
+        "openapi": "3.0.3",
+        "info": {"title": "t", "version": "1"},
+        "paths": {path: {"get": op}},
+    }
+
+
+def test_duplicate_operation_ids_renamed_with_prefix():
+    spec_a = _spec_with_op("getAll", path="/branches")
+    spec_b = _spec_with_op("getAll", path="/centres")
+    merged = build_merged_spec([("Branches", spec_a), ("Centres", spec_b)], "t.example.com", "ts")
+    ids = [item["get"]["operationId"] for item in merged["paths"].values()]
+    assert "getAll" in ids
+    assert "getAll_Centres" in ids
+    # First occurrence keeps the original id
+    assert merged["paths"]["/branches"]["get"]["operationId"] == "getAll"
+
+
+def test_link_reference_to_renamed_operation_id_updated():
+    spec_a = _spec_with_op("getAll", path="/branches")
+    spec_b = _spec_with_op("getAll", path="/centres")
+    # A link object in spec_b referencing its own (about-to-be-renamed) operation
+    spec_b["paths"]["/centres"]["get"]["responses"]["200"]["links"] = {
+        "self": {"operationId": "getAll"}
+    }
+    merged = build_merged_spec([("Branches", spec_a), ("Centres", spec_b)], "t.example.com", "ts")
+    link = merged["paths"]["/centres"]["get"]["responses"]["200"]["links"]["self"]
+    assert link["operationId"] == "getAll_Centres"
+    # The operation itself was renamed exactly once, not double-rewritten
+    assert merged["paths"]["/centres"]["get"]["operationId"] == "getAll_Centres"
+
+
+def test_unique_operation_ids_untouched():
+    spec_a = _spec_with_op("listBranches", path="/branches")
+    spec_b = _spec_with_op("listCentres", path="/centres")
+    merged = build_merged_spec([("Branches", spec_a), ("Centres", spec_b)], "t.example.com", "ts")
+    assert merged["paths"]["/branches"]["get"]["operationId"] == "listBranches"
+    assert merged["paths"]["/centres"]["get"]["operationId"] == "listCentres"

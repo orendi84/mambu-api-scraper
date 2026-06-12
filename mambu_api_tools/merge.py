@@ -43,6 +43,58 @@ def _raw_pointer(section, name):
     return f"#/components/{section}/{_ptr_escape(name)}"
 
 
+_HTTP_METHODS = ("get", "post", "put", "patch", "delete", "head", "options", "trace")
+
+
+def _dedupe_operation_ids(spec, prefix, seen_op_ids):
+    """Rename operationIds already used by an earlier spec.
+
+    Mambu's per-resource specs reuse generic operationIds (e.g. 'getAll'),
+    which makes the merged document invalid. First occurrence keeps the id;
+    later ones become '{id}_{prefix}' (then '_2', '_3'... if needed).
+    Mutates spec in place; returns {old_id: new_id} for this spec.
+    """
+    renames = {}
+    for item in spec.get("paths", {}).values():
+        if not isinstance(item, dict):
+            continue
+        for method, op in item.items():
+            if method.lower() not in _HTTP_METHODS or not isinstance(op, dict):
+                continue
+            op_id = op.get("operationId")
+            if not isinstance(op_id, str):
+                continue
+            if op_id not in seen_op_ids:
+                seen_op_ids.add(op_id)
+                continue
+            new_id = f"{op_id}_{prefix}"
+            suffix = 2
+            while new_id in seen_op_ids:
+                new_id = f"{op_id}_{prefix}_{suffix}"
+                suffix += 1
+            op["operationId"] = new_id
+            seen_op_ids.add(new_id)
+            renames[op_id] = new_id
+    return renames
+
+
+def _update_link_operation_ids(node, renames):
+    """Update link objects that reference a renamed operationId.
+
+    Operations carry a 'responses' key and are skipped; OpenAPI link
+    objects reference operations by 'operationId' and have no 'responses'.
+    """
+    if isinstance(node, dict):
+        op_id = node.get("operationId")
+        if isinstance(op_id, str) and op_id in renames and "responses" not in node:
+            node["operationId"] = renames[op_id]
+        for value in node.values():
+            _update_link_operation_ids(value, renames)
+    elif isinstance(node, list):
+        for item in node:
+            _update_link_operation_ids(item, renames)
+
+
 def _rewrite_refs(node, rename_map):
     """Recursively replace any $ref value that EXACTLY matches a mapped raw pointer.
 
@@ -83,12 +135,18 @@ def build_merged_spec(specs_with_labels, tenant, timestamp):
     }
 
     merge_warnings = []
+    seen_op_ids = set()
 
     for label, spec in specs_with_labels:
         if not isinstance(spec, dict):
             continue
         spec = copy.deepcopy(spec)
         prefix = _camel_prefix(label)
+
+        # Deduplicate operationIds across specs (Mambu reuses e.g. 'getAll').
+        op_renames = _dedupe_operation_ids(spec, prefix, seen_op_ids)
+        if op_renames:
+            _update_link_operation_ids(spec, op_renames)
 
         # Per-spec rename map: raw pointer string -> new raw pointer string.
         rename_map = {}
