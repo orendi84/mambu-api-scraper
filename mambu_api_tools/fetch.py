@@ -95,14 +95,28 @@ def strip_swagger_artifacts(node):
                 node.setdefault(k, v)
             node.pop("extensions", None)
         for key, value in node.items():
-            if key == "properties" and isinstance(value, dict):
-                for prop_key, prop_value in value.items():
-                    # swagger-core copies the property name into the
-                    # property schema as 'name'; drop it only when it
-                    # provably mirrors the key (parameters keep theirs).
-                    if isinstance(prop_value, dict) and prop_value.get("name") == prop_key:
-                        prop_value.pop("name", None)
-                    strip_swagger_artifacts(prop_value)
+            # example/default payloads and x- extension values are opaque
+            # user data, not schema objects; never recurse into or mutate
+            # them even if they contain keys that look like leakage.
+            if key in ("example", "examples", "default") or key.startswith("x-"):
+                continue
+            if key == "responses" and isinstance(value, dict):
+                # 'default' inside a responses map is a response object
+                # (status-code alias), not a default value; process all
+                # members directly so the per-key 'default' skip above
+                # does not exempt it.
+                for resp in value.values():
+                    strip_swagger_artifacts(resp)
+                continue
+            if key in ("properties", "schemas") and isinstance(value, dict):
+                # swagger-core copies the property/schema name into the
+                # object as 'name'; drop it only when it provably mirrors
+                # the key (parameters keep theirs). Map keys themselves
+                # are never touched.
+                for sub_key, sub_value in value.items():
+                    if isinstance(sub_value, dict) and sub_value.get("name") == sub_key:
+                        sub_value.pop("name", None)
+                    strip_swagger_artifacts(sub_value)
             else:
                 strip_swagger_artifacts(value)
     elif isinstance(node, list):

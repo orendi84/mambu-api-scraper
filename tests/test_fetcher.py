@@ -963,3 +963,55 @@ class TestStripSwaggerArtifacts:
         node = {"enum": ["BASIC", "API_KEY", "BASIC", "API_KEY"]}
         strip_swagger_artifacts(node)
         assert node == {"enum": ["BASIC", "API_KEY"]}
+
+    def test_example_payloads_never_mutated(self):
+        import copy
+
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        payload = {
+            "jsonSchema": {"anything": 1},
+            "enum": ["A", "A"],
+            "types": ["x"],
+            "exampleSetFlag": True,
+            "extensions": {},
+        }
+        node = {
+            "schema": {"type": "object", "example": copy.deepcopy(payload)},
+            "examples": {"sample": {"value": copy.deepcopy(payload)}},
+            "default": copy.deepcopy(payload),
+            "x-vendor": copy.deepcopy(payload),
+        }
+        expected_payload = copy.deepcopy(payload)
+        strip_swagger_artifacts(node)
+        assert node["schema"]["example"] == expected_payload
+        assert node["examples"]["sample"]["value"] == expected_payload
+        assert node["default"] == expected_payload
+        assert node["x-vendor"] == expected_payload
+
+    def test_default_response_object_still_normalized(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {
+            "responses": {
+                "default": {
+                    "description": "default response",
+                    "content": {"application/json": {"exampleSetFlag": False}},
+                }
+            }
+        }
+        strip_swagger_artifacts(node)
+        assert node["responses"]["default"]["content"]["application/json"] == {}
+
+    def test_component_schema_name_echo_stripped(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {
+            "schemas": {
+                "Webhook": {"name": "Webhook", "type": "object"},
+                "Other": {"name": "NotMirror", "type": "object"},
+            }
+        }
+        strip_swagger_artifacts(node)
+        assert node["schemas"]["Webhook"] == {"type": "object"}
+        assert node["schemas"]["Other"]["name"] == "NotMirror"

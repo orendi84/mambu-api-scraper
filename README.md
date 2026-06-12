@@ -112,7 +112,9 @@ The output leads with an overall summary table, then a per-resource table sorted
 | `mambu_openapi_{timestamp}.json` | fetch | Single merged OpenAPI 3.0.3 document |
 | `mambu_openapi_fetcher.log` | fetch | Execution log, written into `--output-dir` |
 
-The merged OpenAPI document combines every resource spec into one OpenAPI 3.0.3 file. Component name collisions are shared when definitions are identical and otherwise renamed with a resource-derived prefix, with all `$ref` pointers rewritten accordingly. Path collisions keep the first occurrence and record a warning under `info.x-merge-warnings`.
+The merged OpenAPI document combines every resource spec into one OpenAPI 3.0.3 file. Component name collisions are shared when definitions are identical and otherwise renamed with a resource-derived prefix, with all `$ref` pointers rewritten accordingly. Path collisions keep the first occurrence and record a warning under `info.x-merge-warnings`. Duplicate operationIds across resources are renamed with a resource-derived suffix.
+
+Fetched specs are normalized before any artifact is written: swagger-core serializer internals that Mambu leaks into spec JSON (`exampleSetFlag`, `specVersion`, `types`, `jsonSchema`, literal `extensions` wrappers, property and schema name echoes, duplicate enum values) are stripped so the merged document passes strict OpenAPI validation. Example, default, and `x-` extension payloads are never touched. Saved snapshots get the same normalization on load.
 
 JSON output is compact by default, which roughly halves the file size. Pass `--pretty-json` to restore `indent=2`.
 
