@@ -12,21 +12,24 @@ import pytest
 # Ensure the repo root is on the path so we can import the fetcher
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mambu_openapi_fetcher import (
-    derive_openapi_path,
-    resolve_ref,
-    count_endpoints,
-    schema_to_markdown,
-    parse_auth,
+from mambu_api_tools.common import (
     github_anchor,
-    build_markdown,
-    spec_to_markdown,
     md_cell,
+    parse_auth,
+    resolve_ref,
     slugify_filename,
+)
+from mambu_api_tools.fetch import (
+    count_endpoints,
+    derive_openapi_path,
     filter_resources,
     load_saved_output,
 )
-
+from mambu_api_tools.render import (
+    build_markdown,
+    schema_to_markdown,
+    spec_to_markdown,
+)
 
 # ---------------------------------------------------------------------------
 # derive_openapi_path
@@ -840,7 +843,7 @@ def test_load_saved_output_basic(tmp_path):
 
 def test_load_saved_output_recomputes_endpoint_count(tmp_path):
     """Verify count_endpoints on loaded specs gives correct totals."""
-    from mambu_openapi_fetcher import count_endpoints
+    from mambu_api_tools.fetch import count_endpoints
     path = _make_saved_json(tmp_path)
     data = load_saved_output(path)
     total = sum(count_endpoints(r["spec"]) for r in data["resources"])
@@ -871,3 +874,144 @@ def test_load_saved_output_non_object_raises(tmp_path):
 def test_load_saved_output_missing_file_raises(tmp_path):
     with pytest.raises(OSError):
         load_saved_output(str(tmp_path / "nonexistent.json"))
+
+
+class TestStripSwaggerArtifacts:
+    def test_removes_leaked_keys_and_redundant_types(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {
+            "schema": {
+                "type": "integer",
+                "format": "int32",
+                "exampleSetFlag": False,
+                "specVersion": "V30",
+                "types": ["integer"],
+            }
+        }
+        strip_swagger_artifacts(node)
+        assert node["schema"] == {"type": "integer", "format": "int32"}
+
+    def test_promotes_single_types_when_type_absent(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {"types": ["string"], "exampleSetFlag": True}
+        strip_swagger_artifacts(node)
+        assert node == {"type": "string"}
+
+    def test_property_names_never_touched(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {
+            "properties": {
+                "exampleSetFlag": {"type": "boolean", "specVersion": "V30"},
+                "types": {"type": "string"},
+            }
+        }
+        strip_swagger_artifacts(node)
+        assert set(node["properties"].keys()) == {"exampleSetFlag", "types"}
+        assert node["properties"]["exampleSetFlag"] == {"type": "boolean"}
+        assert node["properties"]["types"] == {"type": "string"}
+
+    def test_extensions_wrapper_hoisted(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {
+            "summary": "Get clients",
+            "extensions": {"x-permissions-allowed": {"allowed": ["VIEW"]}},
+        }
+        strip_swagger_artifacts(node)
+        assert node == {
+            "summary": "Get clients",
+            "x-permissions-allowed": {"allowed": ["VIEW"]},
+        }
+
+    def test_non_x_extensions_object_left_alone(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {"extensions": {"foo": 1}}
+        strip_swagger_artifacts(node)
+        assert node == {"extensions": {"foo": 1}}
+
+    def test_empty_extensions_wrapper_dropped(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {"summary": "s", "extensions": {}}
+        strip_swagger_artifacts(node)
+        assert node == {"summary": "s"}
+
+    def test_jsonschema_duplicate_and_property_name_echo_stripped(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {
+            "type": "object",
+            "jsonSchema": {"type": "object"},
+            "properties": {
+                "city": {"name": "city", "type": "string"},
+                "label": {"name": "somethingElse", "type": "string"},
+            },
+        }
+        strip_swagger_artifacts(node)
+        assert "jsonSchema" not in node
+        assert node["properties"]["city"] == {"type": "string"}
+        # name kept when it does not mirror the property key
+        assert node["properties"]["label"]["name"] == "somethingElse"
+
+    def test_duplicate_enum_values_deduped_in_order(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {"enum": ["BASIC", "API_KEY", "BASIC", "API_KEY"]}
+        strip_swagger_artifacts(node)
+        assert node == {"enum": ["BASIC", "API_KEY"]}
+
+    def test_example_payloads_never_mutated(self):
+        import copy
+
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        payload = {
+            "jsonSchema": {"anything": 1},
+            "enum": ["A", "A"],
+            "types": ["x"],
+            "exampleSetFlag": True,
+            "extensions": {},
+        }
+        node = {
+            "schema": {"type": "object", "example": copy.deepcopy(payload)},
+            "examples": {"sample": {"value": copy.deepcopy(payload)}},
+            "default": copy.deepcopy(payload),
+            "x-vendor": copy.deepcopy(payload),
+        }
+        expected_payload = copy.deepcopy(payload)
+        strip_swagger_artifacts(node)
+        assert node["schema"]["example"] == expected_payload
+        assert node["examples"]["sample"]["value"] == expected_payload
+        assert node["default"] == expected_payload
+        assert node["x-vendor"] == expected_payload
+
+    def test_default_response_object_still_normalized(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {
+            "responses": {
+                "default": {
+                    "description": "default response",
+                    "content": {"application/json": {"exampleSetFlag": False}},
+                }
+            }
+        }
+        strip_swagger_artifacts(node)
+        assert node["responses"]["default"]["content"]["application/json"] == {}
+
+    def test_component_schema_name_echo_stripped(self):
+        from mambu_api_tools.fetch import strip_swagger_artifacts
+
+        node = {
+            "schemas": {
+                "Webhook": {"name": "Webhook", "type": "object"},
+                "Other": {"name": "NotMirror", "type": "object"},
+            }
+        }
+        strip_swagger_artifacts(node)
+        assert node["schemas"]["Webhook"] == {"type": "object"}
+        assert node["schemas"]["Other"]["name"] == "NotMirror"
