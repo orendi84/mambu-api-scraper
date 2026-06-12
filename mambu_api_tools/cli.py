@@ -21,6 +21,7 @@ from .fetch import (
     filter_resources,
     load_saved_output,
 )
+from .merge import build_merged_spec
 from .render import build_markdown, write_split_markdown
 
 log = logging.getLogger(__name__)
@@ -159,6 +160,13 @@ def run_fetch(args):
             split_count = len(list(split_dir.glob("*.md")))
             log.info(f"Split markdown written: {split_dir} ({split_count} files)")
 
+        # Write merged OpenAPI document (envelope JSON is intentionally not re-written here)
+        merged = build_merged_spec(specs_with_labels, tenant, timestamp)
+        merged_file = output_dir / f"mambu_openapi_{timestamp}.json"
+        with open(merged_file, "w", encoding="utf-8") as f:
+            json.dump(merged, f, indent=json_indent, ensure_ascii=False)
+        log.info(f"Merged OpenAPI saved: {merged_file} ({merged_file.stat().st_size / 1024:.0f} KB)")
+
         log.info("=" * 60)
         log.info(f"Done (from-json). {len(specs_with_labels)} resources, {total_endpoints} endpoints")
         log.info(f"Markdown: {md_file}")
@@ -275,6 +283,13 @@ def run_fetch(args):
         split_dir = write_split_markdown(output, specs_with_labels, output_dir, timestamp)
         split_count = len(list(split_dir.glob("*.md")))
         log.info(f"Split markdown written: {split_dir} ({split_count} files)")
+
+    # Save merged OpenAPI document
+    merged = build_merged_spec(specs_with_labels, args.tenant, timestamp)
+    merged_file = output_dir / f"mambu_openapi_{timestamp}.json"
+    with open(merged_file, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=json_indent, ensure_ascii=False)
+    log.info(f"Merged OpenAPI saved: {merged_file} ({merged_file.stat().st_size / 1024:.0f} KB)")
 
     # Summary
     log.info("=" * 60)
