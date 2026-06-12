@@ -114,12 +114,28 @@ def _inline_schema_signature(schema):
     return f"inline:{digest}"
 
 
-def _2xx_schema_ref(spec, details):
-    """Signature of the first 2xx response content schema, or None.
+def _schema_signature(schema):
+    """Signature for a content schema: ref name, array form, or fingerprint."""
+    if not isinstance(schema, dict) or not schema:
+        return None
+    if "$ref" in schema:
+        return schema["$ref"].split("/")[-1]
+    if schema.get("type") == "array":
+        items = schema.get("items", {})
+        if isinstance(items, dict) and "$ref" in items:
+            return items["$ref"].split("/")[-1]
+        if isinstance(items, dict) and items:
+            return f"array[{_inline_schema_signature(items)}]"
+    return _inline_schema_signature(schema)
 
-    $ref schemas yield the ref name; inline schemas yield a short content
-    fingerprint so structural changes to them still register as changes.
+
+def _success_schema_signatures(spec, details):
+    """Mapping '{code} {content-type}' -> schema signature for every 2xx/102 response.
+
+    Covers all success codes and media types so a change behind an
+    unchanged 200 still registers. Inline schemas get content fingerprints.
     """
+    sigs = {}
     responses = details.get("responses", {})
     for code in sorted(str(c) for c in responses.keys()):
         if not (code.startswith("2") or code == "102"):
@@ -130,32 +146,33 @@ def _2xx_schema_ref(spec, details):
             resp = resolved if isinstance(resolved, dict) else {}
         if not isinstance(resp, dict):
             continue
-        for _ct, ct_info in sorted(resp.get("content", {}).items()):
-            schema = ct_info.get("schema", {})
-            if not isinstance(schema, dict) or not schema:
-                continue
-            if "$ref" in schema:
-                return schema["$ref"].split("/")[-1]
-            if schema.get("type") == "array":
-                items = schema.get("items", {})
-                if isinstance(items, dict) and "$ref" in items:
-                    return items["$ref"].split("/")[-1]
-                if isinstance(items, dict) and items:
-                    return f"array[{_inline_schema_signature(items)}]"
-            return _inline_schema_signature(schema)
-    return None
+        for ct, ct_info in sorted(resp.get("content", {}).items()):
+            sig = _schema_signature(ct_info.get("schema", {}))
+            if sig is not None:
+                sigs[f"{code} {ct}"] = sig
+    return sigs
 
 
 def _iter_operations(spec):
-    """Yield (method_upper, path, details) for each operation in a spec."""
+    """Yield (method_upper, path, details) for each operation in a spec.
+
+    Path-item-level parameters are inherited by every operation under the
+    path (OpenAPI semantics), so they are prepended to each operation's
+    parameter list; operation-level parameters win on (name, in) because
+    _collect_params keys by (name, in) and later entries overwrite.
+    """
     for path, methods in spec.get("paths", {}).items():
         if not isinstance(methods, dict):
             continue
+        path_params = methods.get("parameters")
         for method, details in methods.items():
             if method.lower() not in _HTTP_METHODS:
                 continue
             if not isinstance(details, dict):
                 continue
+            if isinstance(path_params, list) and path_params:
+                details = dict(details)
+                details["parameters"] = list(path_params) + list(details.get("parameters", []))
             yield (method.upper(), path, details)
 
 
@@ -249,11 +266,11 @@ def _diff_endpoint(old_spec, new_spec, old_details, new_details):
     if codes_added or codes_removed:
         changes["responses"] = {"added": codes_added, "removed": codes_removed}
 
-    # 2xx schema ref name
-    old_ref = _2xx_schema_ref(old_spec, old_details)
-    new_ref = _2xx_schema_ref(new_spec, new_details)
-    if old_ref != new_ref:
-        changes["response_schema"] = {"old": old_ref, "new": new_ref}
+    # Success response schemas (all 2xx/102 codes and media types)
+    old_sigs = _success_schema_signatures(old_spec, old_details)
+    new_sigs = _success_schema_signatures(new_spec, new_details)
+    if old_sigs != new_sigs:
+        changes["response_schema"] = {"old": old_sigs, "new": new_sigs}
 
     # Deprecated flag transition
     old_dep = bool(old_details.get("deprecated", False))
@@ -543,7 +560,12 @@ def _render_endpoint_changes(changes):
             out.append(f"  - Response code removed: `{code}`")
     rs = changes.get("response_schema")
     if rs:
-        out.append(f"  - 2xx response schema: {rs['old']} -> {rs['new']}")
+        old_sigs, new_sigs = rs["old"], rs["new"]
+        for key in sorted(set(old_sigs) | set(new_sigs)):
+            o = old_sigs.get(key)
+            n = new_sigs.get(key)
+            if o != n:
+                out.append(f"  - Response schema ({key}): {o or '(none)'} -> {n or '(none)'}")
     dep = changes.get("deprecated")
     if dep:
         out.append(f"  - Deprecated: {dep['old']} -> {dep['new']}")

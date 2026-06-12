@@ -428,11 +428,114 @@ def test_inline_response_schema_change_detected():
     assert model["summary"]["endpoints_changed"] == 1
     changed = model["resources_changed"][0]["diff"]["endpoints"]["changed"][0]
     assert "response_schema" in changed["changes"]
-    old_sig = changed["changes"]["response_schema"]["old"]
-    new_sig = changed["changes"]["response_schema"]["new"]
+    old_sig = changed["changes"]["response_schema"]["old"]["200 application/json"]
+    new_sig = changed["changes"]["response_schema"]["new"]["200 application/json"]
     assert old_sig.startswith("inline:") and new_sig.startswith("inline:")
     assert old_sig != new_sig
 
     # Identical inline schemas: no change
     model_same = compute_diff(env_with_inline("string"), env_with_inline("string"))
     assert model_same["summary"]["endpoints_changed"] == 0
+
+
+def _env_one_resource(spec):
+    return {
+        "timestamp": "t",
+        "tenant": "x",
+        "resources_total": 1,
+        "endpoints_total": 1,
+        "resources": [{"label": "Things", "endpoints": 1, "spec": spec}],
+    }
+
+
+def test_path_level_parameter_change_detected():
+    def spec(ptype):
+        return {
+            "openapi": "3.0.3",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/things/{id}": {
+                    "parameters": [
+                        {"name": "id", "in": "path", "required": True, "schema": {"type": ptype}}
+                    ],
+                    "get": {"responses": {"200": {"description": "ok"}}},
+                }
+            },
+        }
+
+    model = compute_diff(_env_one_resource(spec("string")), _env_one_resource(spec("integer")))
+    assert model["summary"]["endpoints_changed"] == 1
+    changes = model["resources_changed"][0]["diff"]["endpoints"]["changed"][0]["changes"]
+    assert "parameters" in changes
+
+    model_same = compute_diff(_env_one_resource(spec("string")), _env_one_resource(spec("string")))
+    assert model_same["summary"]["endpoints_changed"] == 0
+
+
+def test_operation_level_param_overrides_path_level():
+    # Same (name, in) at both levels: operation wins; changing only the
+    # path-level copy must NOT register as a change.
+    def spec(path_type):
+        return {
+            "openapi": "3.0.3",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/things/{id}": {
+                    "parameters": [
+                        {"name": "id", "in": "path", "required": True, "schema": {"type": path_type}}
+                    ],
+                    "get": {
+                        "parameters": [
+                            {"name": "id", "in": "path", "required": True, "schema": {"type": "string"}}
+                        ],
+                        "responses": {"200": {"description": "ok"}},
+                    },
+                }
+            },
+        }
+
+    model = compute_diff(_env_one_resource(spec("string")), _env_one_resource(spec("integer")))
+    assert model["summary"]["endpoints_changed"] == 0
+
+
+def test_second_success_response_schema_change_detected():
+    def spec(ref_name):
+        return {
+            "openapi": "3.0.3",
+            "info": {"title": "t", "version": "1"},
+            "components": {
+                "schemas": {
+                    "A": {"type": "object", "properties": {"x": {"type": "string"}}},
+                    "B": {"type": "object", "properties": {"y": {"type": "string"}}},
+                }
+            },
+            "paths": {
+                "/things": {
+                    "post": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {"schema": {"$ref": "#/components/schemas/A"}}
+                                },
+                            },
+                            "201": {
+                                "description": "created",
+                                "content": {
+                                    "application/json": {"schema": {"$ref": f"#/components/schemas/{ref_name}"}}
+                                },
+                            },
+                        }
+                    }
+                }
+            },
+        }
+
+    model = compute_diff(_env_one_resource(spec("A")), _env_one_resource(spec("B")))
+    assert model["summary"]["endpoints_changed"] == 1
+    changes = model["resources_changed"][0]["diff"]["endpoints"]["changed"][0]["changes"]
+    rs = changes["response_schema"]
+    # 200 unchanged, 201 changed
+    assert rs["old"]["200 application/json"] == rs["new"]["200 application/json"] == "A"
+    assert rs["old"]["201 application/json"] == "A"
+    assert rs["new"]["201 application/json"] == "B"
