@@ -285,14 +285,48 @@ def run_fetch(args):
 
 
 def _build_diff_parser(subparsers):
-    """Placeholder diff subcommand."""
+    """diff subcommand: structural spec diff between two saved envelopes."""
     parser = subparsers.add_parser(
         "diff",
-        help="[Coming soon] Compare two saved output JSON files",
+        help="Compare two saved output JSON files and emit a structural changelog",
+        description="Compare two saved output JSON files and emit a structural changelog",
     )
-    parser.add_argument("before", help="Path to older JSON output")
-    parser.add_argument("after", help="Path to newer JSON output")
+    parser.add_argument("old", help="Path to older JSON output")
+    parser.add_argument("new", help="Path to newer JSON output")
+    parser.add_argument("--output", default=None, metavar="FILE", help="Write markdown to FILE instead of stdout")
+    parser.add_argument(
+        "--exit-code",
+        action="store_true",
+        help="Exit 1 when any structural change is present, 0 when none (for cron automation)",
+    )
     return parser
+
+
+def run_diff(args):
+    """Execute the diff subcommand with parsed args."""
+    from .diff import compute_diff, has_changes, render_diff
+
+    try:
+        old_env = load_saved_output(args.old)
+        new_env = load_saved_output(args.new)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        log.error(f"Failed to load diff inputs: {e}")
+        sys.exit(2)
+
+    model = compute_diff(old_env, new_env)
+    markdown = render_diff(model)
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(markdown)
+            f.write("\n")
+        log.info(f"Diff written: {args.output}")
+    else:
+        print(markdown)
+
+    if args.exit_code and has_changes(model):
+        sys.exit(1)
+    sys.exit(0)
 
 
 def _build_scorecard_parser(subparsers):
@@ -322,8 +356,7 @@ def main():
     if args.command == "fetch":
         run_fetch(args)
     elif args.command == "diff":
-        log.error("diff subcommand is not yet implemented")
-        sys.exit(1)
+        run_diff(args)
     elif args.command == "scorecard":
         log.error("scorecard subcommand is not yet implemented")
         sys.exit(1)
