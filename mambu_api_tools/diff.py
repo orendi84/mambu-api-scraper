@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 
@@ -106,8 +107,19 @@ def _response_codes(details):
     return set(str(c) for c in details.get("responses", {}).keys())
 
 
+def _inline_schema_signature(schema):
+    """Short deterministic fingerprint for an inline (non-$ref) schema."""
+    canon = json.dumps(schema, sort_keys=True, ensure_ascii=False)
+    digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
+    return f"inline:{digest}"
+
+
 def _2xx_schema_ref(spec, details):
-    """Ref name of the first 2xx response content schema, or None."""
+    """Signature of the first 2xx response content schema, or None.
+
+    $ref schemas yield the ref name; inline schemas yield a short content
+    fingerprint so structural changes to them still register as changes.
+    """
     responses = details.get("responses", {})
     for code in sorted(str(c) for c in responses.keys()):
         if not (code.startswith("2") or code == "102"):
@@ -120,12 +132,17 @@ def _2xx_schema_ref(spec, details):
             continue
         for _ct, ct_info in sorted(resp.get("content", {}).items()):
             schema = ct_info.get("schema", {})
-            if isinstance(schema, dict) and "$ref" in schema:
+            if not isinstance(schema, dict) or not schema:
+                continue
+            if "$ref" in schema:
                 return schema["$ref"].split("/")[-1]
-            if isinstance(schema, dict) and schema.get("type") == "array":
+            if schema.get("type") == "array":
                 items = schema.get("items", {})
                 if isinstance(items, dict) and "$ref" in items:
                     return items["$ref"].split("/")[-1]
+                if isinstance(items, dict) and items:
+                    return f"array[{_inline_schema_signature(items)}]"
+            return _inline_schema_signature(schema)
     return None
 
 

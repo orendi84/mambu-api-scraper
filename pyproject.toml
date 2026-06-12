@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "mambu-api-tools"
@@ -14,6 +14,9 @@ dependencies = [
 
 [project.scripts]
 mambu-api-tools = "mambu_api_tools.cli:main"
+
+[tool.setuptools]
+packages = ["mambu_api_tools"]
 
 [tool.ruff]
 line-length = 120

@@ -394,3 +394,45 @@ def test_golden_render():
     golden_path = os.path.join(os.path.dirname(__file__), "golden", "diff_sample.md")
     expected = open(golden_path, encoding="utf-8").read()
     assert rendered == expected
+
+
+def test_inline_response_schema_change_detected():
+    def env_with_inline(inline_type):
+        spec = {
+            "openapi": "3.0.3",
+            "info": {"title": "t", "version": "1"},
+            "paths": {
+                "/things": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {"schema": {"type": inline_type}}
+                                },
+                            }
+                        }
+                    }
+                }
+            },
+        }
+        return {
+            "timestamp": "t",
+            "tenant": "x",
+            "resources_total": 1,
+            "endpoints_total": 1,
+            "resources": [{"label": "Things", "endpoints": 1, "spec": spec}],
+        }
+
+    model = compute_diff(env_with_inline("string"), env_with_inline("integer"))
+    assert model["summary"]["endpoints_changed"] == 1
+    changed = model["resources_changed"][0]["diff"]["endpoints"]["changed"][0]
+    assert "response_schema" in changed["changes"]
+    old_sig = changed["changes"]["response_schema"]["old"]
+    new_sig = changed["changes"]["response_schema"]["new"]
+    assert old_sig.startswith("inline:") and new_sig.startswith("inline:")
+    assert old_sig != new_sig
+
+    # Identical inline schemas: no change
+    model_same = compute_diff(env_with_inline("string"), env_with_inline("string"))
+    assert model_same["summary"]["endpoints_changed"] == 0
