@@ -12,21 +12,24 @@ import pytest
 # Ensure the repo root is on the path so we can import the fetcher
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mambu_openapi_fetcher import (
-    derive_openapi_path,
-    resolve_ref,
-    count_endpoints,
-    schema_to_markdown,
-    parse_auth,
+from mambu_api_tools.common import (
     github_anchor,
-    build_markdown,
-    spec_to_markdown,
     md_cell,
+    parse_auth,
+    resolve_ref,
     slugify_filename,
+)
+from mambu_api_tools.fetch import (
+    count_endpoints,
+    derive_openapi_path,
     filter_resources,
     load_saved_output,
 )
-
+from mambu_api_tools.render import (
+    build_markdown,
+    schema_to_markdown,
+    spec_to_markdown,
+)
 
 # ---------------------------------------------------------------------------
 # derive_openapi_path
@@ -840,7 +843,7 @@ def test_load_saved_output_basic(tmp_path):
 
 def test_load_saved_output_recomputes_endpoint_count(tmp_path):
     """Verify count_endpoints on loaded specs gives correct totals."""
-    from mambu_openapi_fetcher import count_endpoints
+    from mambu_api_tools.fetch import count_endpoints
     path = _make_saved_json(tmp_path)
     data = load_saved_output(path)
     total = sum(count_endpoints(r["spec"]) for r in data["resources"])
